@@ -245,11 +245,14 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 弹幕条目（统一类型，来自 B站 或 弹弹play）
   List<DanmakuItem> _danmakus = const [];
 
-  /// 弹幕时间轴锚点：由 controller 监听器推进，驱动 DanmakuLayer 投放弹幕
-  int _danmakuPosMs = 0;
+  /// 弹幕时间轴只通知弹幕子树，避免每次播放器位置更新都重建整张播放页。
+  final ValueNotifier<({int positionMs, bool playing})> _danmakuClock =
+      ValueNotifier((positionMs: 0, playing: false));
+  int _danmakuGeneration = 0;
 
   /// 当前是否已置「禁止息屏」（避免重复调用 Win32 API）
   bool _keepScreenOn = false;
+  bool _playbackStarting = false;
 
   /// 本集的弹幕是否已开始加载（保证只加载一次，且与播放后端无关）
   bool _danmakuLoadStarted = false;
@@ -753,24 +756,26 @@ class _PlayerPageState extends State<PlayerPage> {
       // 【v1.9.9】扫描 HLS 里的注入广告/前贴（二维码）分片块。
       // 之前 `withAdRanges` 写好了却**从没被调用**，所以检测等于没做。
       // 扫描失败不影响播放，只是没有可跳过的区间。
-      var adRanges = stream.adRanges;
-      if (stream.isHls && adRanges.isEmpty) {
-        try {
-          // withAdRanges 是 play_resolver 的**顶层函数**（不是 PlayResolver 方法）
-          final scanned = await withAdRanges(
-              stream, stream.headers['Referer'] ?? '');
-          adRanges = scanned.adRanges;
-        } catch (e) {
-          kLog('[播放] 广告扫描失败（忽略）: $e');
-        }
-      }
-      if (adRanges.isNotEmpty) {
-        kLog('[播放] 检测到 ${adRanges.length} 段注入广告/前贴，将在播放时自动跳过');
-      }
-
+      // 扫描 HLS 与可播预检并行：以前串行等待两次 CDN 请求，
+      // 即使预检已经失败也要等完整扫描超时，体感起播明显变慢。
+      final scanFuture = stream.isHls && stream.adRanges.isEmpty
+          ? withAdRanges(
+              ResolvedStream(
+                url: playUrl,
+                type: stream.type,
+                headers: stream.headers,
+                via: stream.via,
+              ),
+              stream.headers['Referer'] ?? '',
+            )
+          : Future.value(stream);
       final pre = await _preflightPlayable(stream);
       kLog('[播放] 预检 ${pre ? '通过' : '失败(流被拒)'}');
       if (pre) {
+        final adRanges = (await scanFuture).adRanges;
+        if (adRanges.isNotEmpty) {
+          kLog('[播放] 检测到 ${adRanges.length} 段注入广告/前贴，将在播放时自动跳过');
+        }
         // ─────────────────────────────────────────────────────────────
         // 【v2.0.0】在这里就加载弹幕，**不等播放器就绪**。
         //
@@ -783,12 +788,18 @@ class _PlayerPageState extends State<PlayerPage> {
 
         // 解析成功 → 用本地播放器播（比 WebView 更流畅，支持倍速/拖动）
         setState(() => _statusText = '加载播放器…');
-        return _startPlayback(PlayInfo(
-          url: playUrl,
-          type: stream.type,
-          headers: stream.headers,
-          adRanges: adRanges,
-        ));
+        try {
+          return await _startPlayback(PlayInfo(
+            url: playUrl,
+            type: stream.type,
+            headers: stream.headers,
+            adRanges: adRanges,
+          ));
+        } catch (e) {
+          // 两种解码后端都起播失败时，回到自动换源，不让异常中断整条链。
+          kLog('[播放] 当前线路起播失败，尝试下一线路: $e');
+          return false;
+        }
       }
       // 【v1.8.0 实测】DM84 这类源解析出的地址带**短时效 token**，
       // 偶发返回已过期地址 → 预检 403。这时重新解析一次拿新地址即可，
@@ -980,6 +991,14 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 换线路 / 换集前的统一清理（不触发解析）
   Future<void> _resetForSwitch(KazumiRule rule, String pageUrl, String epTitle, double epSort) async {
     _saveProgress();
+    _outWatchdog?.cancel();
+    _outWatchdog = null;
+    _deadStrikes = 0;
+    _recoverCount = 0;
+    if (_keepScreenOn) {
+      _keepScreenOn = false;
+      windowCtl.setKeepScreenOn(false);
+    }
     await _controller?.dispose();
     _controller = null;
     _completedHandled = false;
@@ -993,8 +1012,10 @@ class _PlayerPageState extends State<PlayerPage> {
       _manualUrl = null;
       _autoRetried = false; // 换源/换集后允许新的一轮自动重试
       _sameSourceRetried = false;
+      _danmakuGeneration++; // 旧请求返回时不允许污染新一集
       _danmakus = const []; // 换源/换集后重新拉弹幕
-      _danmakuPosMs = 0;
+      _danmakuClock.value = (positionMs: 0, playing: false);
+      _danmakuKey = UniqueKey();
       _danmakuLoadStarted = false; // 允许新的一集重新加载
     });
   }
@@ -1033,6 +1054,19 @@ class _PlayerPageState extends State<PlayerPage> {
   // ───────────────────── 播放 ─────────────────────
 
   Future<bool> _startPlayback(PlayInfo info) async {
+    if (_playbackStarting) {
+      kLog('[播放] 已有起播流程在执行，跳过重复创建');
+      return false;
+    }
+    _playbackStarting = true;
+    try {
+      return await _startPlaybackInternal(info);
+    } finally {
+      _playbackStarting = false;
+    }
+  }
+
+  Future<bool> _startPlaybackInternal(PlayInfo info) async {
     // 【v1.9.4 兜底】这里是**所有起播路径的唯一入口**（正常解析、重新解析、
     // 换线路、跨源切换都汇总到这里），所以在这里再还原一次双重编码，
     // 保证无论从哪条路进来，交给播放器的地址都是干净的。
@@ -1040,6 +1074,7 @@ class _PlayerPageState extends State<PlayerPage> {
       url: _normalizeMediaUrl(info.url),
       type: info.type,
       headers: info.headers,
+      adRanges: info.adRanges,
     );
     kLog('[播放] 开始起播流程 ${Uri.parse(info.url).host}');
     final uri = Uri.parse(info.url);
@@ -1099,7 +1134,7 @@ class _PlayerPageState extends State<PlayerPage> {
     // 【v2.0.0 · 黑屏修复之一】播放期间禁止系统息屏/休眠。
     // 全屏看番时长时间无键鼠输入，Windows 到点会关显示器，
     // 表现就是「画面黑了但声音还在」—— 与用户反馈完全一致。
-    windowCtl.setKeepScreenOn(true);
+    // 实际进入播放态后由控制器监听器启用防息屏；初始化不等于已在播放。
     _startOutputWatchdog();
     _e2eAutoFullscreen();
 
@@ -1119,7 +1154,7 @@ class _PlayerPageState extends State<PlayerPage> {
     _e2eDanmakuToggle(); // 自检：验证弹幕开关能关能开
 
     controller.addListener(() {
-      if (!mounted) return;
+      if (!mounted || !identical(_controller, controller)) return;
       // 【v1.9.9】位置更新时检查是否落进注入广告/前贴区间 → 自动跳过。
       // 放在最前面且在任何 setState 之前：跳过是即时的，不该等一帧。
       _maybeSkipAd();
@@ -1131,16 +1166,12 @@ class _PlayerPageState extends State<PlayerPage> {
         windowCtl.setKeepScreenOn(playing);
       }
 
-      // 【v2.0.0】推进弹幕时间轴。
-      // canvas_danmaku 没有时间轴概念，必须由我们从播放器位置驱动；
-      // 用 setState 是为了把新 position 传进 DanmakuLayer.didUpdateWidget。
-      // 弹幕层很轻（CustomPainter 直绘），每帧一次 setState 可接受；
-      // 无弹幕时不触发，避免无谓重建。
+      // 仅刷新弹幕子树：整页 setState 会重建视频 Stack、手势、控制栏，
+      // 高频 position 回调下尤其容易造成卡顿。播放/暂停也由同一时钟驱动。
       if (_danmakus.isNotEmpty) {
-        final ms = controller.position.inMilliseconds;
-        if (ms != _danmakuPosMs) {
-          setState(() => _danmakuPosMs = ms);
-        }
+        final next = (positionMs: controller.position.inMilliseconds,
+            playing: controller.isPlaying);
+        if (next != _danmakuClock.value) _danmakuClock.value = next;
       }
       if (controller.hasError && !controller.isCompleted) {
         final msg = controller.errorText ?? '未知错误';
@@ -1207,27 +1238,31 @@ class _PlayerPageState extends State<PlayerPage> {
     final title = widget.subject.displayName.isNotEmpty
         ? widget.subject.displayName
         : widget.subject.name;
+    final episodeSort = _epSort;
+    final generation = _danmakuGeneration;
     try {
       _danmakuApi.dispose();
-    _danmakus = const [];
-      _danmakuApi = _makeDanmakuApi();
-      final list = await _danmakuApi.fetchAll(
+      _danmakus = const [];
+      final api = _makeDanmakuApi();
+      _danmakuApi = api;
+      final list = await api.fetchAll(
         title,
-        _epSort,
+        episodeSort,
         onNotice: (msg) {
-          // 友好提示：不打断播放，只在底部轻轻提示一下
-          if (mounted) _showHint(msg);
+          if (mounted && generation == _danmakuGeneration) _showHint(msg);
         },
       );
-      if (!mounted) return;
-      // 换集/换源要重置弹幕层时间轴：换 key 强制重建 State
+      if (!mounted || generation != _danmakuGeneration) return;
+      // 网络返回时从真实播放位置开始，不从 0 毫秒补发整集弹幕。
+      final c = _controller;
+      _danmakuClock.value = (positionMs: c?.position.inMilliseconds ?? 0,
+          playing: c?.isPlaying ?? false);
       setState(() {
         _danmakus = list;
-        _danmakuPosMs = 0;
         _danmakuKey = UniqueKey();
       });
-      kLog('[弹幕] 已加载 ${list.length} 条（$title 第${_epSort.toStringAsFixed(0)}集）'
-          '，源=${_danmakuApi.enabledSourceNames.join("/")}');
+      kLog('[弹幕] 已加载 ${list.length} 条（$title 第${episodeSort.toStringAsFixed(0)}集）'
+          '，源=${api.enabledSourceNames.join("/")}');
     } catch (e) {
       // 兜底：无论如何都不能影响播放
       kLog('[弹幕] 加载失败（已忽略，不影响播放）: $e');
@@ -1331,6 +1366,7 @@ class _PlayerPageState extends State<PlayerPage> {
       if (_recovering) return;
 
       final fps = await c.videoOutputFps();
+      if (!mounted || !identical(_controller, c) || !c.isPlaying) return;
       // 心跳：每 10 次探测（约 30s）记一行，用于确认探针真的在工作。
       // 没有这行就无法区分「一切正常」与「探针失效导致看门狗空转」。
       _probeCount++;
@@ -1365,9 +1401,11 @@ class _PlayerPageState extends State<PlayerPage> {
       kLog('[看门狗] 判定为黑屏（有声音无画面），开始恢复');
       // ① 轻刷：重下发 vo + 回退重绘
       final ok = await c.refreshVideoOutput();
+      if (!mounted || !identical(_controller, c)) return;
       if (ok) {
         // 给它 4 秒观察期：若恢复正常，看门狗下一轮会把 strikes 清零
         await Future<void>.delayed(const Duration(seconds: 4));
+        if (!mounted || !identical(_controller, c) || !c.isPlaying) return;
         final fps = await c.videoOutputFps();
         if (fps != null && fps > 0.001) {
           kLog('[看门狗] 轻刷输出后已恢复（fps=$fps）');
@@ -1395,6 +1433,7 @@ class _PlayerPageState extends State<PlayerPage> {
         url: url,
         type: _currentPlayType,
         headers: _currentPlayHeaders,
+        adRanges: _currentAdRanges,
       ));
       // 恢复到原进度
       final nc = _controller;
@@ -1687,7 +1726,9 @@ class _PlayerPageState extends State<PlayerPage> {
         [DeviceOrientation.portraitUp, DeviceOrientation.portraitDown]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _controller?.dispose();
+    _danmakuGeneration++;
     _danmakuApi.dispose();
+    _danmakuClock.dispose();
     super.dispose();
   }
 
@@ -1888,17 +1929,18 @@ class _PlayerPageState extends State<PlayerPage> {
                 fit: StackFit.expand,
                 children: [
                   c.videoWidget(fit: BoxFit.contain),
-                  // 弹幕层：时间轴由 _danmakuPosMs 驱动（canvas_danmaku
-                  // 自身没有时间概念，见 danmaku_layer.dart 文件头说明）。
-                  // 它内部已包 IgnorePointer，不会吞掉播放器手势。
+                  // 弹幕时间轴只更新这棵子树，保留视频纹理和控制栏的稳定性。
                   if (_danmakus.isNotEmpty && Store.settings.danmakuEnabled)
                     Positioned.fill(
-                      child: DanmakuLayer(
-                        key: _danmakuKey,
-                        entries: _danmakus,
-                        positionMs: _danmakuPosMs,
-                        style: _danmakuStyle,
-                        playing: c.isPlaying,
+                      child: ValueListenableBuilder<({int positionMs, bool playing})>(
+                        valueListenable: _danmakuClock,
+                        builder: (_, clock, __) => DanmakuLayer(
+                          key: _danmakuKey,
+                          entries: _danmakus,
+                          positionMs: clock.positionMs,
+                          style: _danmakuStyle,
+                          playing: clock.playing,
+                        ),
                       ),
                     ),
                   // 缓冲指示（v1.5.0：播放中卡顿转圈可见）

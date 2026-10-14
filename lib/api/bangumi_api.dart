@@ -19,7 +19,7 @@ class ApiException implements Exception {
 }
 
 class BangumiApi {
-  static const userAgent = 'kchan/2.0.0 (https://github.com/Koyome/kchan)';
+  static const userAgent = 'kchan/2.1.0 (https://github.com/Koyome/kchan)';
 
   /// ═══════════════ Bangumi 数据源：本机实测结论（2026-10-13） ═══════════════
   ///

@@ -104,7 +104,10 @@ class ResolvedStream {
 /// 给解析结果补上「注入广告区间」（仅 HLS；是否启用由调用方判断）
 Future<ResolvedStream> withAdRanges(ResolvedStream s, String referer) async {
   if (!s.isHls) return s;
-  final ranges = await scanInjectedAds(s.url, {'Referer': referer});
+  final ranges = await scanInjectedAds(s.url, {
+    ...s.headers,
+    if (referer.isNotEmpty && !s.headers.containsKey('Referer')) 'Referer': referer,
+  });
   if (ranges.isEmpty) return s;
   return ResolvedStream(
     url: s.url,
@@ -126,13 +129,15 @@ Future<ResolvedStream> withAdRanges(ResolvedStream s, String referer) async {
 /// 返回广告块的时间区间（毫秒）。解析不了就返回空列表（不折腾、照常播）。
 Future<List<({int startMs, int endMs})>> scanInjectedAds(
   String playlistUrl,
-  Map<String, String> headers,
-) async {
-  final _httpClient = http.Client();
+  Map<String, String> headers, {
+  int depth = 0,
+}) async {
+  if (depth > 1) return const []; // 主列表只下钻一层，避免循环引用
+  final client = http.Client();
   try {
-    final res = await _httpClient
+    final res = await client
         .get(Uri.parse(playlistUrl), headers: headers)
-        .timeout(const Duration(seconds: 10));
+        .timeout(const Duration(seconds: 3));
     if (res.statusCode != 200) return const [];
     final text = utf8.decode(res.bodyBytes, allowMalformed: true);
 
@@ -149,7 +154,7 @@ Future<List<({int startMs, int endMs})>> scanInjectedAds(
           .firstMatch(text);
       if (m != null) {
         final sub = Uri.parse(playlistUrl).resolve(m.group(1)!).toString();
-        return await scanInjectedAds(sub, headers);
+        return await scanInjectedAds(sub, headers, depth: depth + 1);
       }
       return const [];
     }
@@ -221,6 +226,8 @@ Future<List<({int startMs, int endMs})>> scanInjectedAds(
     return ranges;
   } catch (_) {
     return const [];
+  } finally {
+    client.close();
   }
 }
 

@@ -4,7 +4,9 @@ library;
 import 'package:flutter/material.dart';
 
 import '../api/bangumi_api.dart';
-import '../api/kazumi_rules.dart' show RuleRegistry;
+import '../api/follow_updates.dart';
+import '../api/kazumi_rules.dart' show BuiltinRules, RuleRegistry;
+import '../api/rule_update.dart';
 import '../api/source_groups.dart';
 import '../api/system_proxy.dart';
 import '../api/video_sources.dart';
@@ -29,6 +31,13 @@ class _SettingsPageState extends State<SettingsPage> {
 
   /// 设置页里已展开的「线路大类」（v1.9.3）
   final Set<SourceKind> _expandedKinds = {};
+
+  /// 规则库更新（v2.1.0）：手动刷新中的转圈与最近一次结果
+  bool _ruleUpdating = false;
+  RuleUpdateReport? _ruleReport;
+
+  /// 追番更新检测（v2.1.0）：手动检测中的转圈
+  bool _followScanning = false;
 
   /// 把当前的源开关 + 线路大类偏好写回本地存储。
   ///
@@ -624,6 +633,229 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  // ═══════════════ 规则库在线更新（v2.1.0）═══════════════
+  //
+  // 对齐 Kazumi「规则商店 → 检查更新 → 批量更新」的机制：
+  //   - 启动时后台自动检查（可在卡片上关掉）；
+  //   - 手动「检查并更新」入口，结果就地展示；
+  //   - 更新失败不影响任何现有规则（失败只写日志与提示）。
+
+  /// 【手动刷新入口 · 第一段】只拉远程目录并比对版本（1 个请求），
+  /// 有可更新项时给一个「全部更新」动作（对齐 Kazumi 的 toast + action）。
+  Future<void> _checkRuleUpdate() async {
+    if (_ruleUpdating) return;
+    setState(() => _ruleUpdating = true);
+    final check = await RuleUpdater.instance.checkForUpdates(force: true);
+    if (!mounted) return;
+    setState(() => _ruleUpdating = false);
+    _showRuleSnack(
+      check.summary,
+      actionLabel: check.hasUpdate ? '全部更新' : null,
+      onAction: () => _applyRuleUpdate(check.updatable),
+    );
+  }
+
+  /// 【手动刷新入口 · 第二段】只下载真正有更新的那几条 → 校验 → 合并 → 落盘
+  Future<void> _applyRuleUpdate(List<RuleCatalogItem> items) async {
+    if (_ruleUpdating) return;
+    setState(() => _ruleUpdating = true);
+    final report = await RuleUpdater.instance.applyUpdates(items);
+    if (report.hasUpdate) {
+      // 规则换新 → 重建源列表；用户开关按名匹配，不受影响
+      SourceRegistry.invalidate();
+    }
+    if (!mounted) return;
+    setState(() {
+      _ruleUpdating = false;
+      _ruleReport = report;
+    });
+    _showRuleSnack(report.summary);
+  }
+
+  /// 【手动检测入口】扫一遍「在看/想看」的番，看有没有出新一集
+  Future<void> _scanFollowUpdates() async {
+    if (_followScanning) return;
+    setState(() => _followScanning = true);
+    final report = await FollowUpdateService.instance.scan(force: true);
+    if (!mounted) return;
+    setState(() => _followScanning = false);
+    final msg = report.updated > 0
+        ? '${report.updated} 部番剧有新一集'
+        : (report.failed > 0
+            ? '暂未检测到更新（${report.failed} 部没扫到）'
+            : '暂未检测到更新');
+    _showRuleSnack(msg);
+  }
+
+  void _showRuleSnack(String msg,
+      {String? actionLabel, VoidCallback? onAction}) {
+    final snack = SnackBar(
+      content: Text(msg),
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(seconds: 4),
+      action: actionLabel == null || onAction == null
+          ? null
+          : SnackBarAction(label: actionLabel, onPressed: onAction),
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(snack);
+  }
+
+  Widget _ruleUpdateCard(ColorScheme cs) {
+    final last = RuleUpdater.instance.lastCheck;
+    final installed = BuiltinRules.externalRules.length;
+    final r = _ruleReport;
+    final String status;
+    if (r != null) {
+      status = r.summary;
+    } else if (last == null) {
+      status = '尚未检查（启动时会自动检查一次）';
+    } else {
+      status = '上次检查：${_agoText(last)}';
+    }
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+      decoration: BoxDecoration(
+        border: Border.all(color: cs.outlineVariant, width: .9),
+        borderRadius: BorderRadius.circular(K.radiusSm),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Icon(Icons.sync_rounded, size: 16, color: cs.onSurfaceVariant),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('规则库在线更新',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 2),
+                    Text(
+                      '内置 ${BuiltinRules.assetRules.length} 条'
+                      '${installed > 0 ? " · 在线更新 $installed 条" : ""}'
+                      '\n$status',
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodySmall
+                          ?.copyWith(fontSize: 11, height: 1.5),
+                    ),
+                  ],
+                ),
+              ),
+              if (_ruleUpdating)
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 12),
+                  child: SizedBox(
+                      width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 1.8)),
+                )
+              else
+                TextButton(
+                  onPressed: _checkRuleUpdate,
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                  ),
+                  child: const Text('检查更新', style: TextStyle(fontSize: 12.5)),
+                ),
+            ],
+          ),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: const Text('启动时自动检查', style: TextStyle(fontSize: 12.5)),
+            subtitle: const Text('后台拉取 KazumiRules 官方规则，失败不影响现有线路',
+                style: TextStyle(fontSize: 10.5)),
+            value: Store.settings.rulesAutoUpdate,
+            activeThumbColor: K.accent,
+            onChanged: (v) => Store.settings.setRulesAutoUpdate(v),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 【v2.1.0】追番更新检测：动漫更新后自动识别出新一集
+  Widget _followUpdateCard(ColorScheme cs) {
+    final svc = FollowUpdateService.instance;
+    final pending = svc.pendingCount;
+    final last = svc.lastScanAt;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+      decoration: BoxDecoration(
+        border: Border.all(color: cs.outlineVariant, width: .9),
+        borderRadius: BorderRadius.circular(K.radiusSm),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Icon(Icons.notifications_active_outlined, size: 16, color: cs.onSurfaceVariant),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('追番更新检测',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 2),
+                    Text(
+                      pending > 0
+                          ? '$pending 部番剧有新一集'
+                              '${last == null ? '' : ' · 上次检查 ${_agoText(last)}'}'
+                          : (last == null ? '尚未检测（启动时会自动检测一次）' : '上次检查：${_agoText(last)}'),
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodySmall
+                          ?.copyWith(fontSize: 11, height: 1.5),
+                    ),
+                  ],
+                ),
+              ),
+              if (_followScanning)
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 12),
+                  child: SizedBox(
+                      width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 1.8)),
+                )
+              else
+                TextButton(
+                  onPressed: _scanFollowUpdates,
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                  ),
+                  child: const Text('立即检测', style: TextStyle(fontSize: 12.5)),
+                ),
+            ],
+          ),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: const Text('启动时自动检测', style: TextStyle(fontSize: 12.5)),
+            subtitle: const Text('扫描「在看/想看」的番，比对最新集数，失败不影响现有功能',
+                style: TextStyle(fontSize: 10.5)),
+            value: Store.settings.followAutoScan,
+            activeThumbColor: K.accent,
+            onChanged: (v) => Store.settings.setFollowAutoScan(v),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 「x 分钟前 / x 小时前 / x 天前」
+  static String _agoText(DateTime t) {
+    final d = DateTime.now().difference(t);
+    if (d.inMinutes < 1) return '刚刚';
+    if (d.inMinutes < 60) return '${d.inMinutes} 分钟前';
+    if (d.inHours < 24) return '${d.inHours} 小时前';
+    return '${d.inDays} 天前';
+  }
+
   // ═══════════════ 播放源（线路）分组管理 ═══════════════
   //
   // 【v1.9.3 完全重做】
@@ -659,7 +891,13 @@ class _SettingsPageState extends State<SettingsPage> {
             '实际参与聚合 $activeCount 条。',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.6),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 10),
+          // ── 规则库在线更新（v2.1.0）──
+          _ruleUpdateCard(cs),
+          const SizedBox(height: 10),
+          // ── 追番更新检测（v2.1.0）──
+          _followUpdateCard(cs),
+          const SizedBox(height: 10),
           // 快速操作
           Wrap(
             spacing: 8,

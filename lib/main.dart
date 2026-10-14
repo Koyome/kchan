@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:fvp/fvp.dart' as fvp;
+import 'package:path_provider/path_provider.dart';
 import 'package:webview_flutter/webview_flutter.dart' as wv;
 
 import 'store/local_store.dart';
@@ -14,10 +15,12 @@ import 'pages/detail_page.dart';
 import 'theme.dart';
 import 'api/diag_log.dart';
 import 'api/child_process_manager.dart';
+import 'api/follow_updates.dart';
 import 'api/js_gate.dart';
 import 'api/kazumi_rules.dart';
 import 'api/player_backend.dart' show initPlayerBackend;
 import 'api/play_resolver.dart' as resolver;
+import 'api/rule_update.dart';
 import 'api/system_proxy.dart';
 import 'api/window_ctl.dart' as windowCtl;
 import 'api/video_sources.dart';
@@ -214,6 +217,19 @@ Future<void> _warmUpAfterFirstFrame() async {
   try {
     installRuleAssetLoader(rootBundle.loadString);
     final sw = Stopwatch()..start();
+    // 先装入「上次在线更新下载的规则」（不联网；损坏自动忽略），
+    // 再加载内置资产 —— 合并时在线版本更新者覆盖同名内置规则。
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      RuleUpdater.instance.installOverrideFile(
+          '${dir.path}${Platform.pathSeparator}rules_override.json');
+      // 跨重启的时间戳持久化（见 RuleUpdater.lastCheckReader 的说明）
+      RuleUpdater.instance.lastCheckReader = () => Store.settings.rulesLastCheckMs;
+      RuleUpdater.instance.lastCheckWriter = Store.settings.setRulesLastCheckMs;
+      await RuleUpdater.instance.loadInstalledOverride();
+    } catch (e) {
+      kLog('[启动] 规则覆盖文件装入失败（忽略）: $e');
+    }
     await BuiltinRules.load();
     kLog('[启动] 规则库就绪：${BuiltinRules.all.length} 条（${sw.elapsedMilliseconds}ms）');
     SourceRegistry.invalidate(); // 规则换新后重建源列表
@@ -221,6 +237,36 @@ Future<void> _warmUpAfterFirstFrame() async {
     debugPrint('BuiltinRules.load failed: $e\n$st');
   }
   flushDiagLog(); // 关键节点：把启动日志真正落盘
+
+  // ①.5 启动自动检查规则更新（后台静默）。
+  //
+  // 对齐 Kazumi 的启动检查：拉远程目录 → 版本比对 → 下载校验 → 覆盖合并。
+  // 全部失败只进日志，不影响内置规则与任何现有功能。
+  // 应用成功后重建源列表 —— 新番出新一集时，最新规则保证解析链路是活的，
+  // 用户进入详情页重新聚合即可拿到最新一集的可用资源。
+  if (Store.settings.rulesAutoUpdate) {
+    unawaited(RuleUpdater.instance.autoCheck(onApplied: (report) {
+      kLog('[启动] 规则库已自动更新：${report.summary}，重建源列表');
+      SourceRegistry.invalidate();
+    }));
+  }
+
+  // ①.6 启动自动检测「追的番有没有出新一集」（后台静默）。
+  //
+  // 这是「动漫更新了，k酱 里也有最新一集看」的关键一环：
+  // 规则更新保证**解析链路是活的**，这里保证**用户知道出了新一集**。
+  // 扫描结果写进 Store.followUpdates，追番页据此显示「更新至第 N 集」红点；
+  // 点进去走 DetailPage 的实时聚合，拿到的就是最新一集的可播资源。
+  //
+  // 同样全部失败只进日志：检测挂了，追番列表和历史进度照常可用。
+  FollowUpdateService.instance.configure(
+    reader: (id) => Store.followUpdates.of(id),
+    writer: (entry) => Store.followUpdates.put(entry),
+    subjects: () => Store.favorites.trackedSubjects(),
+  );
+  if (Store.settings.followAutoScan) {
+    unawaited(FollowUpdateService.instance.scan());
+  }
 
   // ② 反爬闸门钩子：纯赋值，无 IO
   resolver.jsGateHook = bypassJsGate;

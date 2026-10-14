@@ -13,10 +13,10 @@ import 'package:flutter/material.dart';
 ///
 /// 之所以不用 `package_info_plus` 读真实包信息：那会引入新的原生插件，
 /// 而本项目 Android 侧的插件注册是手工打补丁的，加插件成本高、风险大。
-const String kAppVersion = 'v2.0.0';
+const String kAppVersion = 'v2.1.0';
 
 /// 应用版本号（数字部分，用于对比/展示）
-const String kAppVersionNumber = '2.0.0';
+const String kAppVersionNumber = '2.1.0';
 
 class K {
   // ---- 形态判定（v1.6.0 移动端适配）----

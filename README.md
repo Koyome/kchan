@@ -116,6 +116,15 @@ dart run tool/verify_rules_real.dart
 # 线路体检：逐条测可用性、耗时、线路数，输出 JSON
 dart run tool/probe_sources.dart --json source_health.json
 
+# 规则库在线更新链路验证（联网）—— 24 个用例
+dart run tool/verify_rule_update.dart
+
+# 新番解析体检：用本季新番标题逐源跑搜索 → 分集
+dart run tool/probe_newanime.dart
+
+# 追番更新检测验证（联网）—— 首次扫描不误报、落后能报更新、容错
+dart run tool/verify_follow_updates.dart
+
 # 封面反代可用性探测
 dart run tool/probe_covers.dart
 
@@ -134,6 +143,10 @@ dart run tool/verify_playback.dart
 | `[启动] 规则库就绪：86 条（Nms）` | 规则加载完成，正常应在 50ms 内 |
 | `[聚合] 共 6 条线路：快车道 3 条 …` | 本次聚合的线路分组 |
 | `[源搜索] <源> kw="…" 命中 N 条 Nms` | 某线路的搜索耗时与命中数 |
+| `[规则更新] 目录 N 条 / 本地 M 条 / 可更新 K 条` | 启动时比对远程规则目录的结果 |
+| `[规则更新] 已应用 N 条更新：<源>→<版本>` | 规则覆盖已落盘并生效 |
+| `[追番] <番名>：更新了！第 N → M 集（源 X）` | 追番检测到出新一集 |
+| `[追番] 扫描结束：FollowScanReport(...)` | 一轮追番扫描的汇总 |
 | `[播放] <源> 解析成功 <url>` | 拿到播放地址 |
 | `[播放] 预检 通过` | 起播前连通性检查通过 |
 | `[封面] 命中 N/M（Nms）` | 封面候选链第 N 个命中 |

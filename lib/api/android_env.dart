@@ -72,12 +72,16 @@ String get androidVideoRenderer {
 
 /// 缓存字节数（对齐 Kazumi `PlaybackCachePolicy`）
 ///
-/// - 计费网络（移动数据）：**2MB** —— 省流量，且低端机不会被大缓存拖爆内存
-/// - 其它（Wi-Fi/桌面）：1500MB —— 拖动/跳转几乎瞬时就绪
+/// Windows 桌面端由原先的 1500MB 限为 64MB，避免切线时多实例
+/// 前向 + 后向缓存同时占用大量内存；Android 保持原参数不变。
 int get playerBufferBytes {
-  if (!Platform.isAndroid) return 1500 * 1024 * 1024;
+  if (!Platform.isAndroid) return 64 * 1024 * 1024;
   return isMeteredNetwork ? 2 * 1024 * 1024 : 1500 * 1024 * 1024;
 }
+
+/// 桌面后向缓存只需保留短距离回退容量；Android 保持旧值。
+int get playerBackBufferBytes =>
+    Platform.isAndroid ? playerBufferBytes : 8 * 1024 * 1024;
 
 /// 供日志用的一段环境摘要
 String describeAndroidEnv() {

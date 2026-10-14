@@ -156,6 +156,10 @@ class SettingsStore extends ChangeNotifier {
   static const _kProxyFollowSystem = 'proxy_follow_system';
   static const _kProxyManualEnabled = 'proxy_manual_enabled';
   static const _kProxyManualUrl = 'proxy_manual_url';
+  // v2.1.0：规则库自动更新
+  static const _kRulesAutoUpdate = 'rules_auto_update';
+  static const _kRulesLastCheckMs = 'rules_last_check_ms';
+  static const _kFollowAutoScan = 'follow_auto_scan';
 
   late SharedPreferences _sp;
   /// SharedPreferences 不可用时的降级标志：此时所有写入只留在内存，
@@ -189,6 +193,20 @@ class SettingsStore extends ChangeNotifier {
   bool proxyManualEnabled = false;
   /// 手动代理地址，如 `127.0.0.1:7890`
   String proxyManualUrl = '';
+
+  /// 【v2.1.0】规则库自动更新：启动时在后台检查 KazumiRules 远程更新
+  /// （失败不影响现有规则；关掉后仍可在设置页手动刷新）
+  bool rulesAutoUpdate = true;
+
+  /// 【v2.1.0】上次检查远程规则目录的时间戳（毫秒）。
+  ///
+  /// 落盘是为了让 [RuleUpdater.autoInterval] 的节流跨重启生效 ——
+  /// 否则每次冷启动都会打一次远程仓库。
+  int rulesLastCheckMs = 0;
+
+  /// 【v2.1.0】追番更新检测：启动时在后台扫描「在看/想看」的番出新集没有
+  /// （失败只是没提示，不影响追番列表与播放）
+  bool followAutoScan = true;
 
   Future<void> init() async {
     // SharedPreferences 依赖原生插件。若插件未注册（例如 APK 打包时
@@ -241,6 +259,9 @@ class SettingsStore extends ChangeNotifier {
       proxyFollowSystem = _sp.getBool(_kProxyFollowSystem) ?? true;
       proxyManualEnabled = _sp.getBool(_kProxyManualEnabled) ?? false;
       proxyManualUrl = _sp.getString(_kProxyManualUrl) ?? '';
+      rulesAutoUpdate = _sp.getBool(_kRulesAutoUpdate) ?? true;
+      rulesLastCheckMs = _sp.getInt(_kRulesLastCheckMs) ?? 0;
+      followAutoScan = _sp.getBool(_kFollowAutoScan) ?? true;
     }
     _apply();
   }
@@ -321,6 +342,26 @@ class SettingsStore extends ChangeNotifier {
     }
     if (on.length == 1 && on.contains('AGE')) return true;
     return false;
+  }
+
+  /// 【v2.1.0】规则库自动更新开关
+  Future<void> setRulesAutoUpdate(bool v) async {
+    rulesAutoUpdate = v;
+    await _w(() => _sp.setBool(_kRulesAutoUpdate, v));
+    notifyListeners();
+  }
+
+  /// 【v2.1.0】记录上次检查远程规则目录的时间
+  Future<void> setRulesLastCheckMs(int ms) async {
+    rulesLastCheckMs = ms;
+    await _w(() => _sp.setInt(_kRulesLastCheckMs, ms));
+  }
+
+  /// 【v2.1.0】追番更新检测开关
+  Future<void> setFollowAutoScan(bool v) async {
+    followAutoScan = v;
+    await _w(() => _sp.setBool(_kFollowAutoScan, v));
+    notifyListeners();
   }
 
   /// 设置网络出口（代理）
@@ -532,6 +573,18 @@ class FavoritesStore extends _JsonFileStore {
     notifyListeners();
   }
 
+  /// 需要检测更新的番剧：只看「在看」和「想看」
+  ///
+  /// 「看过 / 搁置 / 抛弃」不扫——省请求，也避免给已完结的老番刷红点。
+  /// 取消收藏后自动从这里消失，无需手动清理快照。
+  List<Subject> trackedSubjects() {
+    final list = <FavEntry>[
+      for (final e in map.values)
+        if (e.status == FavStatus.doing || e.status == FavStatus.wish) e,
+    ]..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    return [for (final e in list) e.subject];
+  }
+
   List<FavEntry> byStatus(FavStatus st) {
     final list = map.values.where((e) => e.status == st).toList();
     list.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
@@ -648,12 +701,94 @@ class HistoryStore extends _JsonFileStore {
   }
 }
 
+/// 追番更新快照表
+///
+/// 只存「每部番上次扫到的最新集数」，不存剧集列表（列表每次进详情页都会实时拉）。
+/// 由 `FollowUpdateService` 读写，UI 只读。
+class FollowUpdatesStore extends _JsonFileStore {
+  @override
+  String get fileName => 'follow_updates.json';
+
+  static const _kMaxTracked = 500;
+
+  final Map<int, FollowUpdateEntry> map = {};
+
+  @override
+  void load(dynamic json) {
+    if (json is Map) {
+      for (final e in json.entries) {
+        final id = int.tryParse(e.key.toString());
+        if (id == null || e.value is! Map) continue;
+        map[id] = FollowUpdateEntry.fromJson((e.value as Map).cast<String, dynamic>());
+      }
+    }
+  }
+
+  @override
+  dynamic dump() => map.map((k, v) => MapEntry('$k', v.toJson()));
+
+  FollowUpdateEntry? of(int subjectId) => map[subjectId];
+
+  bool hasUpdate(int subjectId) => (map[subjectId]?.newSince ?? 0) > 0;
+
+  /// 待看更新的番数（红点数）
+  int get pendingCount => map.values.where((e) => e.hasUpdate).length;
+
+  /// 写入/更新快照。
+  ///
+  /// 直接存 [e]：`newSince`（新集发现时间）由 `FollowUpdateService.scan`
+  /// 统一判定后写进 entry，这里不再重算——两处各算一遍必然不一致。
+  void put(FollowUpdateEntry e) {
+    map[e.subjectId] = e;
+    _trim();
+    scheduleSave();
+    notifyListeners();
+  }
+
+  /// 用户已看过最新集 → 清掉红点
+  void markSeen(int subjectId) {
+    final e = map[subjectId];
+    if (e == null || e.newSince == 0) return;
+    map[subjectId] = FollowUpdateEntry(
+      subjectId: e.subjectId,
+      latestSort: e.latestSort,
+      scannedAt: e.scannedAt,
+      newSince: 0,
+      sourceName: e.sourceName,
+    );
+    scheduleSave();
+    notifyListeners();
+  }
+
+  void remove(int subjectId) {
+    if (map.remove(subjectId) == null) return;
+    scheduleSave();
+    notifyListeners();
+  }
+
+  void clear() {
+    map.clear();
+    scheduleSave();
+    notifyListeners();
+  }
+
+  /// 防止收藏过多导致文件无限膨胀：丢掉最久没扫的
+  void _trim() {
+    if (map.length <= _kMaxTracked) return;
+    final sorted = map.values.toList()..sort((a, b) => a.scannedAt.compareTo(b.scannedAt));
+    for (final e in sorted.take(map.length - _kMaxTracked)) {
+      map.remove(e.subjectId);
+    }
+  }
+}
+
 /// 聚合根：所有本地存储
 class Store {
   static final settings = SettingsStore();
   static final favorites = FavoritesStore();
   static final progress = ProgressStore();
   static final history = HistoryStore();
+  static final followUpdates = FollowUpdatesStore();
 
   static Future<void> init() async {
     await settings.init();
@@ -664,12 +799,18 @@ class Store {
       dir = null;
     }
     dir ??= Directory.systemTemp;
-    await Future.wait([favorites.init(dir), progress.init(dir), history.init(dir)]);
+    await Future.wait([
+      favorites.init(dir),
+      progress.init(dir),
+      history.init(dir),
+      followUpdates.init(dir),
+    ]);
   }
 
   static Future<void> clearAllUserData() async {
     favorites.clear();
     progress.clear();
     history.clear();
+    followUpdates.clear();
   }
 }

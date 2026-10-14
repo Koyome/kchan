@@ -158,8 +158,16 @@ const _uaMobile =
     'Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 '
     '(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
 
-/// 单次 HTTP 请求超时。实测国内源正常 0.3～2s；8s 未回视为站点不可用。
-const _kRequestTimeout = Duration(seconds: 8);
+/// 单次 HTTP 请求超时。
+///
+/// 【v2.1.0 调整】旧值 8s 是「实测国内源正常 0.3～2s」时定的。
+/// 但 2026-10-14 用本季新番实测（tool/probe_newanime.dart）发现：
+/// DM84 在新番高峰期单次请求要 2.6~6.8s、gugu3 整站每个请求都 >8s，
+/// 8s 超时把这些「慢但没死」的源误判成「连接失败」——
+/// 这正是「新番经常解析失败（线路问题）」的主要表象。
+/// 调到 12s：慢源有机会完成；真正死掉的源仍然失败，只是多等 4s，
+/// 而详情页各源是并发聚合的，不会拖慢快车道的首屏。
+const _kRequestTimeout = Duration(seconds: 12);
 
 /// 默认并发竞速的关键词变体个数
 const _kVariantRace = 2;
@@ -416,23 +424,51 @@ class RuleVideoSource implements VideoSource {
     String? fallbackTitle,
     List<SourceSearchItem> seeds = const [],
   }) async {
-    // 取第一个命中项的链接作为详情页
-    final detailUrl = seeds.isNotEmpty
-        ? seeds.first.url
-        : (categoryId != null ? '${rule.baseURL}$categoryId' : '');
-    if (detailUrl.isEmpty) {
+    // 【v2.1.0】首条命中未必是目标条目：
+    // 新番常有同名旧作/总集篇/真人版/上一季，搜索排第一的可能是它们，
+    // 抓回来的详情页要么分集为空、要么根本不是这部番。
+    // 现在依次尝试前几条命中，直到拿到**非空分集**为止。
+    final candidates = <String>[
+      for (final s in seeds.take(3))
+        if (s.url.trim().isNotEmpty) s.url,
+      if (seeds.isEmpty && categoryId != null) '${rule.baseURL}$categoryId',
+    ];
+    if (candidates.isEmpty) {
       return SourceBangumi(title: fallbackTitle ?? '');
     }
 
     final parser = KazumiParser(rule);
-    RuleBangumiDetail detail;
-    if (rule.usesApiChapter) {
-      // api 模式：detailUrl 实际是 searchApiConfig 取到的「源标识」（如视频 id）
-      final raw = await _apiRequest(rule.chapterApiConfig.request, {'source': detailUrl});
-      detail = parser.parseDetailJson(raw, source: detailUrl);
-    } else {
-      final html = await _get(detailUrl);
-      detail = parser.parseDetail(html);
+    RuleBangumiDetail detail = const RuleBangumiDetail(roads: []);
+    Object? lastError;
+    var attempts = 0, failures = 0;
+    for (final detailUrl in candidates) {
+      attempts++;
+      try {
+        if (rule.usesApiChapter) {
+          // api 模式：detailUrl 实际是 searchApiConfig 取到的「源标识」（如视频 id）
+          final raw = await _apiRequest(
+              rule.chapterApiConfig.request, {'source': detailUrl});
+          detail = parser.parseDetailJson(raw, source: detailUrl);
+        } else {
+          final html = await _get(detailUrl);
+          detail = parser.parseDetail(html);
+        }
+      } catch (e) {
+        failures++;
+        lastError = e;
+        kLog('[源详情] ${rule.name} 抓取失败 $detailUrl: '
+            '${e.toString().split('\n').first}');
+        continue;
+      }
+      if (detail.allEpisodes.isNotEmpty) break; // 拿到分集即停
+    }
+    // 所有候选都抛了异常 → 抛回最后一个错误，让上层显示「连接失败」
+    // 而不是被误判成「未收录」（两者 UI 提示不同）。
+    if (detail.allEpisodes.isEmpty &&
+        attempts > 0 &&
+        failures == attempts &&
+        lastError != null) {
+      throw lastError;
     }
 
     final roads = <SourceRoad>[];

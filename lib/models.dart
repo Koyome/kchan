@@ -312,3 +312,72 @@ class CalendarDay {
   final List<Subject> items;
   const CalendarDay({required this.weekday, required this.weekdayCn, this.items = const []});
 }
+
+/// 追番更新快照：一部番「上次扫到的最新集数」
+///
+/// 追番检测的全部依据就是拿源站当前最新集数和这里的 [latestSort] 比：
+/// 变大了 = 出新集了。
+///
+/// 【v2.1.0】为什么需要它：翻遍 Kazumi 源码，**没有**追番更新检测——
+/// 它靠「打开番剧时实时 queryChapterRoads()」拿到最新集，是实时查询而非
+/// 后台比对，收藏卡片上也没有红点/集数快照。所以这里没有可抄的实现，
+/// 只能自己存基线再比对。
+///
+/// 首次扫描只记录基线、不提示（否则一装上就整页红点）。
+/// 见 `FollowUpdateService.scan` 里 `baseline == null` 的分支。
+class FollowUpdateEntry {
+  final int subjectId;
+
+  /// 已知的最新集数（sort 值）
+  final double latestSort;
+
+  /// 上次扫描时间（毫秒）
+  final int scannedAt;
+
+  /// **首次发现新集**的时间（毫秒）。0 = 没有待看更新。
+  /// 用户点进去看过之后清 0，红点消失。
+  final int newSince;
+
+  /// 上次扫出这个结果的源（诊断用）
+  final String sourceName;
+
+  const FollowUpdateEntry({
+    required this.subjectId,
+    this.latestSort = 0,
+    this.scannedAt = 0,
+    this.newSince = 0,
+    this.sourceName = '',
+  });
+
+  bool get hasUpdate => newSince > 0;
+
+  FollowUpdateEntry copyWith({
+    double? latestSort,
+    int? scannedAt,
+    int? newSince,
+    String? sourceName,
+  }) =>
+      FollowUpdateEntry(
+        subjectId: subjectId,
+        latestSort: latestSort ?? this.latestSort,
+        scannedAt: scannedAt ?? this.scannedAt,
+        newSince: newSince ?? this.newSince,
+        sourceName: sourceName ?? this.sourceName,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'subject_id': subjectId,
+        'latest_sort': latestSort,
+        'scanned_at': scannedAt,
+        'new_since': newSince,
+        'source': sourceName,
+      };
+
+  factory FollowUpdateEntry.fromJson(Map<String, dynamic> j) => FollowUpdateEntry(
+        subjectId: (j['subject_id'] as num?)?.toInt() ?? 0,
+        latestSort: (j['latest_sort'] as num?)?.toDouble() ?? 0,
+        scannedAt: (j['scanned_at'] as num?)?.toInt() ?? 0,
+        newSince: (j['new_since'] as num?)?.toInt() ?? 0,
+        sourceName: j['source']?.toString() ?? '',
+      );
+}

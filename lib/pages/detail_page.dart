@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../api/bangumi_api.dart';
 import '../api/diag_log.dart' show kLog;
+import '../api/follow_updates.dart';
 import '../api/kazumi_rules.dart' show RuleRegistry;
 import '../api/source_groups.dart';
 import '../api/video_sources.dart';
@@ -28,7 +29,7 @@ class DetailPage extends StatefulWidget {
   State<DetailPage> createState() => _DetailPageState();
 }
 
-class _DetailPageState extends State<DetailPage> {
+class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
   SubjectDetail? _detail;
   List<Episode> _episodes = [];
   List<BgmCharacter> _chars = [];
@@ -59,10 +60,45 @@ class _DetailPageState extends State<DetailPage> {
 
   int _tab = 0; // 0 分集 1 详情/简介 2 角色 3 相关
 
+  /// 上次聚合成功的时间戳（用于「回到详情页时自动检测新一集」）
+  DateTime? _sourcesFetchedAt;
+
+  /// 聚合结果保鲜期：超过这个时长再回到详情页就自动重新聚合一次。
+  ///
+  /// 【v2.1.0】新番周更时，用户经常是「应用一直开着 / 从后台切回来」。
+  /// 这时详情页里缓存的剧集列表还停在几小时前，看不到新出的一集。
+  /// 设成 10 分钟：既不会在短时间内反复刷（引发用户反馈的「变卡」），
+  /// 也能保证切回前台时拿到最新一集的可用资源。
+  static const Duration _sourcesTtl = Duration(minutes: 10);
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _load();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// 【v2.1.0】切回前台时自动检测新一集。
+  ///
+  /// 只在「页面可见 + 数据已过期 + 空闲中」时才重新聚合，
+  /// 不阻塞 UI、不叠加并发（刷新中的请求由 `_sourceLoading` 挡住）。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    if (!mounted || _sourceLoading) return;
+    final at = _sourcesFetchedAt;
+    if (at == null) return;
+    if (DateTime.now().difference(at) < _sourcesTtl) return;
+    final s = _detail ?? widget.initial;
+    if (s == null) return;
+    kLog('[详情] 恢复前台：聚合结果已过期（${DateTime.now().difference(at).inMinutes} 分钟）→ 自动刷新线路');
+    _loadSources(s);
   }
 
   Future<void> _load() async {
@@ -143,6 +179,12 @@ class _DetailPageState extends State<DetailPage> {
     });
     final title = subject.displayName.isNotEmpty ? subject.displayName : subject.name;
     _sourceTitle = title;
+    // 【v2.1.0】备用名：Bangumi 的中文名与日文名都记下。
+    // 新番最常见「中文名搜不到、日文名能搜到」（或反过来）——
+    // 实测 FQDM 搜「转生就是剑 第二季」0 条、搜「転生したら剣でしたII」命中。
+    // 主名无结果时单源会自动用备用名重试（见 _runOneSource）。
+    final alt = (title == subject.nameCn) ? subject.name : subject.nameCn;
+    _sourceAltTitle = alt.trim();
 
     // 按「实测耗时」排序（未测过的排最后，用规则的解析方式做二级排序：
     // 直链 > 接口 > 云播 > 人机验证）
@@ -172,6 +214,9 @@ class _DetailPageState extends State<DetailPage> {
       final restPending = [for (final s in rest) _runOneSource(s, title)];
       await Future.wait(restPending);
       if (mounted) setState(() => _sourceLoading = false);
+      // 记录聚合完成时间，供「切回前台自动检测新一集」判断新鲜度
+      _sourcesFetchedAt = DateTime.now();
+      _recordFollowLatest();
     }());
 
     // 【E2E 自动化】等第一条可用线路出来就自动播放（测试专用）
@@ -205,27 +250,57 @@ class _DetailPageState extends State<DetailPage> {
   /// 当前聚合用的番名（单源刷新时复用）
   String _sourceTitle = '';
 
+  /// 备用番名（日文/中文中的另一个；主名搜不到时兜底用）
+  String _sourceAltTitle = '';
+
   /// 正在单独刷新中的源（卡片上显示转圈）
   final Set<String> _refreshingSources = {};
 
   /// 单源聚合：搜索 → 分集。
   ///
-  /// 【v1.9.1 时序收敛】超时全面下调（实测国内源正常 0.3～2s）：
-  ///   - `search` 20s → 10s
-  ///   - `bangumiDetail` 25s → 10s
-  ///   - 「网络类失败自动重试」的 1.5s 等待 → 去掉：
-  ///     改成由 `search()` 内部自己做变体并发竞速（已经在源头解决瞬时抖动），
-  ///     外层再叠一层 1.5s + 20s 的重试纯粹是让首屏更慢。
-  ///     手动刷新按钮（卡片上的 ↻）依然保留，用户可随时重试。
+  /// 【v2.1.0 · 新番修复】两处实测驱动的调整：
+  ///   1. 超时 10s → 15s：DM84 这类「慢但没死」的源在新番高峰期
+  ///      单请求就要 6~7s，10s 外层超时把它整源误判成「连接失败」；
+  ///   2. 主名无命中/异常时，用**备用名**（日文 ↔ 中文）重试一次：
+  ///      实测 FQDM 用中文名搜不到「转生就是剑 第二季」，换日文名即命中。
+  ///
+  /// 超时只对慢源生效；各源并发聚合，快车道的首屏不受影响。
   Future<void> _runOneSource(VideoSource s, String title, {bool isManualRefresh = false}) async {
     if (isManualRefresh) {
       setState(() => _refreshingSources.add(s.id));
     }
     final sw = Stopwatch()..start();
     try {
-      final hits = await s.search(title).timeout(const Duration(seconds: 10));
+      final hits = await s.search(title).timeout(const Duration(seconds: 15));
+      if (hits.isEmpty) {
+        // 主名未收录 → 备用名兜底（只多一次搜索，命中即换备用名展示）
+        final alt = _sourceAltTitle;
+        if (alt.isNotEmpty && alt != title) {
+          final altHits = await s
+              .search(alt)
+              .timeout(const Duration(seconds: 15))
+              .catchError((_) => const <SourceSearchItem>[]);
+          if (altHits.isNotEmpty) {
+            kLog('[聚合] ${s.name} 主名「$title」未命中，备用名「$alt」命中 ${altHits.length} 条');
+            await _fillSource(s, alt, altHits, sw);
+            return;
+          }
+        }
+      }
       await _fillSource(s, title, hits, sw);
     } catch (e) {
+      // 主名抛错（超时/连接失败）也试一次备用名：有的源只是对某个词不响应
+      final alt = _sourceAltTitle;
+      if (alt.isNotEmpty && alt != title) {
+        try {
+          final altHits = await s.search(alt).timeout(const Duration(seconds: 15));
+          if (altHits.isNotEmpty) {
+            kLog('[聚合] ${s.name} 主名「$title」异常，备用名「$alt」命中 ${altHits.length} 条');
+            await _fillSource(s, alt, altHits, sw);
+            return;
+          }
+        } catch (_) {/* 备用名也失败，落回原错误 */}
+      }
       _sources[s.id] = AggregatedSource(
           source: s, bangumi: SourceBangumi(title: title), error: '连接失败');
       kLog('[聚合] ${s.name} kw="$title" 失败(${sw.elapsedMilliseconds}ms): '
@@ -243,11 +318,34 @@ class _DetailPageState extends State<DetailPage> {
     } else {
       final b = await s
           .bangumiDetail(fallbackTitle: _stripBracket(hits.first.title), seeds: hits)
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 15));
       _sources[s.id] = AggregatedSource(
           source: s, bangumi: b, error: b.episodes.isEmpty ? '未收录可播放剧集' : null);
     }
     kLog('[聚合] ${s.name} kw="$title" ok ${sw.elapsedMilliseconds}ms');
+  }
+
+  /// 聚合出结果后，把「扫到的最新集数」回写给追番检测。
+  ///
+  /// 不回写会误报：用户在详情页刷新看到第 25 集，后台快照还停在 24，
+  /// 下一轮定时扫描拿 25 比 24，又亮一次红点——可用户早看过了。
+  /// 回写后基线跟着走，红点只在**真的**出新集时才亮。
+  void _recordFollowLatest() {
+    final agg = _currentSource;
+    if (agg == null) return;
+    double max = 0;
+    for (final r in agg.bangumi.roads) {
+      for (final e in r.episodes) {
+        if (e.sort > max) max = e.sort.toDouble();
+      }
+    }
+    for (final e in agg.bangumi.episodes) {
+      if (e.sort > max) max = e.sort.toDouble();
+    }
+    if (max <= 0) return;
+    final s = _detail ?? widget.initial;
+    if (s == null) return;
+    FollowUpdateService.instance.recordLatest(s.id, max, sourceName: agg.source.name);
   }
 
   /// 手动刷新单条线路（卡片上的刷新按钮）

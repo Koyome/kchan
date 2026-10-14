@@ -91,6 +91,7 @@ class ApiChapterFormat {
 
 /// 反爬验证码配置（对齐 Kazumi 的 antiCrawlerConfig）
 class AntiCrawlerConfig {
+
   final bool enabled;
   final int captchaType;
   final String captchaImage;
@@ -125,6 +126,16 @@ class AntiCrawlerConfig {
       captchaDetectValue: '${j['captchaDetectValue'] ?? ''}',
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'enabled': enabled,
+        'captchaType': captchaType,
+        'captchaImage': captchaImage,
+        'captchaInput': captchaInput,
+        'captchaButton': captchaButton,
+        'captchaDetectType': captchaDetectType,
+        'captchaDetectValue': captchaDetectValue,
+      };
 }
 
 /// API 请求模板
@@ -158,6 +169,15 @@ class ApiRequestConfig {
       body: j['body'],
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'method': method,
+        'url': url,
+        if (headers.isNotEmpty) 'headers': headers,
+        if (query.isNotEmpty) 'query': query,
+        'bodyType': bodyType,
+        if (body != null) 'body': body,
+      };
 }
 
 /// API 搜索配置
@@ -183,6 +203,13 @@ class ApiSearchConfig {
       sourcePath: '${j['sourcePath'] ?? r'$.url'}',
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'request': request.toJson(),
+        'listPath': listPath,
+        'namePath': namePath,
+        'sourcePath': sourcePath,
+      };
 }
 
 /// 剧集播放页模板
@@ -198,6 +225,11 @@ class ApiEpisodePageConfig {
       query: _strMap(j['query']),
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'url': url,
+        if (query.isNotEmpty) 'query': query,
+      };
 }
 
 /// API 章节配置
@@ -265,6 +297,23 @@ class ApiChapterConfig {
           : null,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'request': request.toJson(),
+        'format': format,
+        'roadsPath': roadsPath,
+        'roadNamePath': roadNamePath,
+        'episodesPath': episodesPath,
+        'episodeNamePath': episodeNamePath,
+        'episodeUrlPath': episodeUrlPath,
+        if (roadNamesPath.isNotEmpty) 'roadNamesPath': roadNamesPath,
+        if (roadEpisodesPath.isNotEmpty) 'roadEpisodesPath': roadEpisodesPath,
+        'roadSeparator': roadSeparator,
+        'episodeSeparator': episodeSeparator,
+        'fieldSeparator': fieldSeparator,
+        if (variables.isNotEmpty) 'variables': variables,
+        if (episodePage != null) 'episodePage': episodePage!.toJson(),
+      };
 }
 
 Map<String, dynamic> _strMap(Object? v) {
@@ -445,6 +494,12 @@ class KazumiRule {
         'adBlocker': adBlocker,
         'searchMode': searchMode,
         'chapterMode': chapterMode,
+        if (antiCrawler.enabled) 'antiCrawlerConfig': antiCrawler.toJson(),
+        // api level 8 规则必须带接口配置，否则落盘后再载入就退化失效
+        if (usesApiSearch || !searchApiConfig.request.isEmpty)
+          'searchApiConfig': searchApiConfig.toJson(),
+        if (usesApiChapter || !chapterApiConfig.request.isEmpty)
+          'chapterApiConfig': chapterApiConfig.toJson(),
       };
 
   /// 把 `@keyword` 替换成 URL 编码后的关键词
@@ -926,12 +981,83 @@ class BuiltinRules {
   /// 资产路径
   static const String assetPath = 'assets/rules/kazumi_rules.json';
 
+  /// 资产里解析出的规则（内置权威基线）
+  static List<KazumiRule>? _assetCache;
+
+  /// 在线更新下载的规则（覆盖同名内置规则，由 [RuleUpdater] 维护）
+  static List<KazumiRule> _external = [];
+
   static List<KazumiRule>? _cache;
 
   /// 已完成加载的规则列表（同步）。未加载时返回空列表，请先 await [load]。
   static List<KazumiRule> get all => _cache ?? const <KazumiRule>[];
 
   static bool get isLoaded => _cache != null;
+
+  /// 仅资产规则（不含在线更新）
+  static List<KazumiRule> get assetRules => _assetCache ?? const <KazumiRule>[];
+
+  /// 当前生效的在线更新规则（覆盖文件里来的那份）
+  static List<KazumiRule> get externalRules => _external;
+
+  /// 版本比对（对齐 Kazumi `utils/version.dart` 的 needUpdate）：
+  /// 逐段数字比较，`remote` 比 `local` 新才为 true。
+  /// 解析失败时退化为「不相等即算新」（与 Kazumi 的兜底一致）。
+  static bool isNewerVersion(String localVersion, String remoteVersion) {
+    try {
+      final l = localVersion.split('.');
+      final r = remoteVersion.split('.');
+      final n = l.length > r.length ? l.length : r.length;
+      for (var i = 0; i < n; i++) {
+        final lv = i < l.length ? int.parse(l[i]) : 0;
+        final rv = i < r.length ? int.parse(r[i]) : 0;
+        if (rv > lv) return true;
+        if (rv < lv) return false;
+      }
+      return false;
+    } catch (_) {
+      return localVersion != remoteVersion;
+    }
+  }
+
+  /// 合并内置规则与在线更新（对齐 Kazumi `_replacePlugin` 的覆盖语义）：
+  ///  - 同名（大小写不敏感）时外部**版本更新或相同**才覆盖内置 —— 绝不降级
+  ///    （防止镜像滞后/App 升级后旧覆盖文件反过来顶掉更新的内置规则）；
+  ///  - 外部独有的规则追加到末尾。
+  static List<KazumiRule> mergeRules(
+      List<KazumiRule> base, List<KazumiRule> extra) {
+    if (extra.isEmpty) return base;
+    final byKey = <String, KazumiRule>{};
+    final order = <String>[];
+    for (final r in base) {
+      final k = r.name.toLowerCase();
+      if (!byKey.containsKey(k)) order.add(k);
+      byKey[k] = r;
+    }
+    for (final r in extra) {
+      final k = r.name.toLowerCase();
+      final cur = byKey[k];
+      if (cur == null) {
+        order.add(k);
+        byKey[k] = r;
+      } else if (cur.version == r.version ||
+          isNewerVersion(cur.version, r.version)) {
+        byKey[k] = r;
+      }
+      // 外部版本更旧 → 保留内置（防止降级）
+    }
+    return [for (final k in order) byKey[k]!];
+  }
+
+  /// 注入在线更新的规则。
+  ///
+  /// 在 [load] **之前**调用即可参与首次合并；在 [load] 之后调用会立刻
+  /// 重建生效列表（调用方负责随后 `SourceRegistry.invalidate()`）。
+  static void setExternalRules(List<KazumiRule> rules) {
+    _external = rules;
+    final asset = _assetCache;
+    if (asset != null) _cache = mergeRules(asset, _external);
+  }
 
   /// 从资产加载规则。App 启动时调用一次即可；重复调用是幂等的。
   static Future<List<KazumiRule>> load({
@@ -947,7 +1073,8 @@ class BuiltinRules {
       text = '';
     }
     if (text.trim().isEmpty) {
-      _cache = fallbackRules();
+      _assetCache = fallbackRules();
+      _cache = mergeRules(_assetCache!, _external);
       return _cache!;
     }
 
@@ -955,10 +1082,11 @@ class BuiltinRules {
     // 【诊断】把解析结果写日志：资产存在但解析不出来时（JSON 写坏、字段改名）
     // 只看「源列表为空」是查不出原因的。
     if (parsed.isEmpty) {
-      _cache = fallbackRules();
+      _assetCache = fallbackRules();
     } else {
-      _cache = parsed;
+      _assetCache = parsed;
     }
+    _cache = mergeRules(_assetCache!, _external);
     return _cache!;
   }
 
@@ -974,7 +1102,11 @@ class BuiltinRules {
   /// 注意这里刻意用「函数里 new 出对象」而不是 `const` 字面量：
   /// const 字面量只有在 TFA 判定该分支为活代码时才会保留其字符串常量，
   /// 实测中被整体消除；改成运行期构造后字符串必定进包。
+  // 下面两个构造**不要**改成 const：const 字面量会被 TFA 整体消除，
+  // 兜底规则里的 baseURL/searchURL 等字符串就不会进包，兜底等于失效。
+  // ignore: prefer_const_constructors
   static List<KazumiRule> fallbackRules() => <KazumiRule>[
+        // ignore: prefer_const_constructors
         KazumiRule(
           api: '1',
           name: 'AGE',
@@ -988,6 +1120,7 @@ class BuiltinRules {
           chapterResult: '//ul/li/a',
           useLegacyParser: false,
         ),
+        // ignore: prefer_const_constructors
         KazumiRule(
           api: '5',
           name: 'DM84',

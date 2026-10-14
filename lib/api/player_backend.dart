@@ -323,13 +323,14 @@ class MediaKitHandle extends ChangeNotifier implements VideoHandle {
       }
 
       await set('demuxer-max-bytes', size);
-      await set('demuxer-max-back-bytes', size);
+      await set('demuxer-max-back-bytes', playerBackBufferBytes.toString());
       await set('af', 'scaletempo2=max-speed=8');
       if (_isAndroid) {
         await set('ao', 'audiotrack');
         await set('volume-max', '100');
       }
-      kLog('[播放器] mpv 调优已应用：demuxer=${playerBufferBytes ~/ (1024 * 1024)}MB'
+      kLog('[播放器] mpv 调优已应用：前向=${playerBufferBytes ~/ (1024 * 1024)}MB '
+          '后向=${playerBackBufferBytes ~/ (1024 * 1024)}MB'
           '${_isAndroid ? " ao=audiotrack" : ""} af=scaletempo2');
     } catch (e) {
       kLog('[播放器] mpv 调优跳过（不影响播放）: $e');

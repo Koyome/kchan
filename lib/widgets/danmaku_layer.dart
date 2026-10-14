@@ -174,8 +174,9 @@ class DanmakuLayerState extends State<DanmakuLayer> {
 
     final pos = widget.positionMs;
 
-    // 位置大幅后退 → 用户拖了进度条 → 重同步
-    if (pos < _lastPos - 1500) {
+    // 网络弹幕迟到、快进或后退时不能补发跨越区间的全部旧弹幕：
+    // 那会一次性创建大量 ui.Image，造成明显卡顿和内存尖峰。
+    if (pos < _lastPos - 1500 || pos > _lastPos + 2500) {
       _resync(pos);
       _lastPos = pos;
       return;
@@ -211,26 +212,32 @@ class DanmakuLayerState extends State<DanmakuLayer> {
     if (c == null) return;
     c.clear();
 
-    // 游标推进到当前位置之后
-    _cursor = 0;
-    while (_cursor < widget.entries.length &&
-        widget.entries[_cursor].timeMs <= posMs) {
-      _cursor++;
-    }
-
-    // 把最近 duration 秒内的弹幕重新注入，避免 seek 后画面空白。
-    // （会从右边重新滚入 —— 0.3.3 没有 offset，这是近似）
+    // 有序时间轴上二分定位，避免每次 seek 都扫描整集弹幕。
+    final end = _firstAfter(posMs);
+    _cursor = end;
+    // 0.3.3 没有 offset，只能从右边缘重新滚入最近一段。
+    // 最多 60 条，防止弹幕密集区一次生成数百张字形图片。
     final windowMs = (c.option.duration * 1000).round();
-    final from = posMs - windowMs;
-    var n = 0;
-    for (final e in widget.entries) {
-      if (e.timeMs >= from && e.timeMs <= posMs) {
-        _add(e);
-        n++;
-      }
+    final start = _firstAfter(posMs - windowMs);
+    final first = start > end - 60 ? start : end - 60;
+    for (var i = first; i < end; i++) {
+      _add(widget.entries[i]);
     }
     kLog('[弹幕] seek 到 ${(posMs / 1000).toStringAsFixed(1)}s，'
-        '重注入 $n 条，游标 → $_cursor');
+        '重注入 ${end - first} 条，游标 → $_cursor');
+  }
+
+  int _firstAfter(int ms) {
+    var lo = 0, hi = widget.entries.length;
+    while (lo < hi) {
+      final mid = lo + (hi - lo) ~/ 2;
+      if (widget.entries[mid].timeMs <= ms) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    return lo;
   }
 
   @override
