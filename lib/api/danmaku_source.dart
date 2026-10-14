@@ -636,6 +636,292 @@ class BilibiliDanmakuSource implements DanmakuSource {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  danmu_api 聚合源（用户自建实例）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// [danmu_api](https://github.com/huangxd-/danmu_api) 聚合服务客户端。
+///
+/// ## 为什么需要它（这是覆盖率的关键）
+///
+/// 实测：B站单源只能覆盖约 85%（版权/区域限制）。
+/// `进击的巨人` / `我推的孩子` / `Code Geass R2` 这类在 B站番剧库
+/// 与用户投稿里都拿不到。
+///
+/// `danmu_api` 是一个开源弹幕聚合服务器，聚合
+/// 「爱优腾芒哔咪人韩巴狐乐西埋帆红」等十多个源，
+/// 并以**弹弹play 兼容的接口规范**对外提供服务（因此无需 API 凭证）。
+///
+/// 本机实测（同一批番，第 1 集）：
+///
+/// | 番名 | B站直连 | danmu_api |
+/// | --- | --- | --- |
+/// | 进击的巨人 | 0 条 | **1612 条**（源: renren） |
+/// | 我推的孩子 | 0 条 | 37 条 |
+/// | Code Geass 反叛的鲁路修R2 | 0 条 | 47 条 |
+///
+/// 它还支持 Gamer（巴哈姆特動畫瘋）等源 —— 评论里的 `p` 第 4 段
+/// 就是来源标签（`[bilibili]` / `[renren]` / `[gamer]` …），
+/// Kazumi 的「Gamer 弹幕开关」就是按这个标签过滤的。
+///
+/// ## 为什么让用户自建而不是内置公共地址
+///
+/// 1. 实测**没有任何可用的公共实例**（试了 5 个候选，全部超时）；
+/// 2. 内置第三方地址不可靠，且会把大量用户流量压到别人的免费额度上。
+///
+/// 所以走「用户填自己的实例地址」模式 —— 与图片反代完全一致。
+/// 自建是**免费**的（Vercel / Netlify / Cloudflare / HuggingFace 一键部署），
+/// 详见仓库 README。
+class DanmuApiSource implements DanmakuSource {
+  DanmuApiSource({required this.baseUrl, http.Client? client})
+      : _c = client ?? http.Client();
+
+  /// 实例根地址，如 `https://xxx.vercel.app`
+  ///
+  /// 若实例设了非默认 `TOKEN`，用户可写成 `https://xxx.vercel.app/<TOKEN>`，
+  /// 这里会原样拼接（与服务端的 `/{TOKEN}/api/...` 路由一致）。
+  final String baseUrl;
+
+  final http.Client _c;
+
+  @override
+  String get id => 'danmu_api';
+
+  @override
+  String get displayName => '弹幕聚合（自建）';
+
+  @override
+  bool get available => baseUrl.trim().isNotEmpty;
+
+  static const _ua =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+  String get _root {
+    var b = baseUrl.trim();
+    while (b.endsWith('/')) {
+      b = b.substring(0, b.length - 1);
+    }
+    return b;
+  }
+
+  Map<String, String> get _headers => {
+        'User-Agent': _ua,
+        'Accept': 'application/json',
+      };
+
+  @override
+  Future<List<DanmakuItem>> fetch({
+    required String animeTitle,
+    required double episode,
+  }) async {
+    final title = animeTitle.trim();
+    if (title.isEmpty || !available) return const [];
+    try {
+      final epId = await _findEpisodeId(title, episode);
+      if (epId == null) {
+        kLog('[弹幕/聚合] 未匹配到「$title」第 ${episode.toStringAsFixed(0)} 集');
+        return const [];
+      }
+      final items = await _comments(epId);
+      if (items.isNotEmpty) {
+        // 统计来源分布，便于排查（这就是 Gamer / BiliBili 标签的来源）
+        final srcs = <String, int>{};
+        for (final i in items) {
+          srcs[i.source] = (srcs[i.source] ?? 0) + 1;
+        }
+        kLog('[弹幕/聚合] episodeId=$epId，${items.length} 条，'
+            '来源分布=$srcs');
+      }
+      return items;
+    } catch (e) {
+      kLog('[弹幕/聚合] 拉取失败: $e');
+      return const [];
+    }
+  }
+
+  /// 搜索剧集 → 取 episodeId
+  ///
+  /// ## 候选怎么选（实测踩坑后加的规则）
+  ///
+  /// 聚合服务会返回同一部番的**多个版本**，标题形如
+  /// `进击的巨人(最终季 完结篇 前篇)(2023)【电影】from renren`，
+  /// 其中 `【电影】`/`【电视剧】` 这类**不是我们要的 TV 动画**。
+  ///
+  /// 踩过的坑：搜「进击的巨人」第 1 集时，若只取第一个可用条目，
+  /// 会选中 2023 年的**剧场版**，它的弹幕时间轴与 TV 第 1 集完全对不上。
+  ///
+  /// 所以按下面的偏好打分排序：
+  ///   1. 类型为 `【日番】/【动画】/【动漫】` 优先（TV 动画），
+  ///      `【电影】/【电视剧】` 大幅降权
+  ///   2. 剧集标题里的集号与目标集一致 → 加分
+  ///   3. 标题与番名完全匹配 → 加分
+  Future<int?> _findEpisodeId(String title, double episode) async {
+    final q = Uri.encodeQueryComponent(title);
+    final ep = episode.round();
+    final uri = Uri.parse(
+        '$_root/api/v2/search/episodes?anime=$q&episode=$ep');
+    final r = await _c
+        .get(uri, headers: _headers)
+        .timeout(const Duration(seconds: 25));
+    if (r.statusCode != 200) {
+      throw HttpException('HTTP ${r.statusCode}');
+    }
+    final j = jsonDecode(utf8.decode(r.bodyBytes));
+    if (j is! Map) return null;
+    final animes = j['animes'];
+    if (animes is! List) return null;
+
+    // (分数, episodeId, 描述)
+    final scored = <(int, int, String)>[];
+    for (final a in animes) {
+      if (a is! Map) continue;
+      final aTitle = '${a['animeTitle'] ?? ''}';
+      final eps = a['episodes'];
+      if (eps is! List) continue;
+
+      var base = 0;
+      // ① 标题必须是同一部番 —— 这是最关键的一道闸门。
+      //
+      // 实测踩坑：搜「我推的孩子」时聚合服务第一个候选是
+      // **真人版电视剧**（【我推的孩子】(2024)【电视剧】），
+      // 搜「命运石之门」第一个候选是**续作**「命运石之门0」。
+      // 只判断「包含」会把它们全放进来，弹幕内容与正片无关。
+      final norm = _normalizeTitle(title);
+      if (norm.isEmpty) continue;
+      if (_normalizeTitle(aTitle) == norm) {
+        base += 40; // 完全同名，最可信
+      } else if (_stripAggMeta(aTitle).startsWith(norm)) {
+        base += 12; // 同一部但带季/年份后缀（如「命运石之门0」）
+      } else {
+        continue; // 不是同一部番，直接丢掉
+      }
+
+      // ② 类型偏好：TV 动画优先，真人电影/电视剧降权
+      if (_kAggAnimeType.hasMatch(aTitle)) {
+        base += 20;
+      } else if (_kAggNonAnimeType.hasMatch(aTitle)) {
+        base -= 25; // 与 TV 单集时间轴对不上
+      }
+
+      for (final e in eps) {
+        if (e is! Map) continue;
+        final id = (e['episodeId'] as num?)?.toInt();
+        if (id == null || id <= 0) continue;
+        final epTitle = '${e['episodeTitle'] ?? ''}';
+        var score = base;
+        // ③ 集号一致
+        if (_epMatches(epTitle, ep)) score += 10;
+        scored.add((score, id, '$aTitle / $epTitle'));
+      }
+    }
+    if (scored.isEmpty) {
+      kLog('[弹幕/聚合] 「$title」没有同名候选（可能只是名字相近的其它作品）');
+      return null;
+    }
+    scored.sort((a, b) => b.$1.compareTo(a.$1));
+
+    final (best, id, label) = scored.first;
+    // 同名但全是真人版/电影时，时间轴不可信 → 宁可不给
+    if (best < 0) {
+      kLog('[弹幕/聚合] 「$title」同名候选全是电影/电视剧（score=$best），'
+          '时间轴不可信，放弃。候选：$label');
+      return null;
+    }
+    kLog('[弹幕/聚合] 选中（score=$best）$label');
+    return id;
+  }
+
+  /// 去掉聚合标题里的装饰，只留作品名
+  ///
+  /// 例：`葬送的芙莉莲(2023)【日番】from bilibili` → `葬送的芙莉莲`
+  static String _stripAggMeta(String s) {
+    var t = s;
+    // 去掉 "from xxx" 尾巴
+    final fi = t.indexOf('from ');
+    if (fi > 0) t = t.substring(0, fi);
+    // 去掉【类型】
+    t = t.replaceAll(RegExp(r'【[^】]*】'), '');
+    // 去掉 (年份) / [年份]
+    t = t.replaceAll(RegExp(r'[（(\[][12]\d{3}[)）\]]'), '');
+    return t.trim();
+  }
+
+  /// 归一化：去掉所有空白与括号装饰，便于严格比对
+  static String _normalizeTitle(String s) {
+    var t = _stripAggMeta(s);
+    t = t.replaceAll(RegExp(r'[\s\u3000]'), '');
+    // 去掉开头的书名号/括号
+    t = t.replaceAll(RegExp(r'^[《【\[（(]+|[》】\]）)]+$'), '');
+    return t.trim();
+  }
+
+  /// TV 动画的类型标签
+  static final RegExp _kAggAnimeType = RegExp(r'【(日番|动画|动漫|国创|番剧)】');
+
+  /// 非 TV 动画的类型标签（时间轴与单集对不上）
+  static final RegExp _kAggNonAnimeType = RegExp(r'【(电影|电视剧|综艺|纪录片)】');
+
+  /// 集号匹配：聚合源返回的标题形如「【renren】 第01集」「第1话 …」
+  static bool _epMatches(String epTitle, int want) {
+    final m = RegExp(r'第\s*0*(\d{1,3})\s*[集话話]').firstMatch(epTitle);
+    if (m != null && int.tryParse(m.group(1)!) == want) return true;
+    final m2 = RegExp(r'(\d{1,3})').firstMatch(epTitle);
+    return m2 != null && int.tryParse(m2.group(1)!) == want;
+  }
+
+  /// 拉弹幕。返回体与弹弹play 一致：`{count, comments:[{cid,p,m,t,like}]}`
+  Future<List<DanmakuItem>> _comments(int episodeId) async {
+    final uri = Uri.parse('$_root/api/v2/comment/$episodeId'
+        '?withRelated=true&chConvert=0&format=json');
+    final r = await _c
+        .get(uri, headers: _headers)
+        .timeout(const Duration(seconds: 30));
+    if (r.statusCode == 429) {
+      // 聚合服务会替我们打上游，被限流是常见情况 —— 不算错误
+      kLog('[弹幕/聚合] 上游限流（429），本次跳过');
+      return const [];
+    }
+    if (r.statusCode != 200) throw HttpException('HTTP ${r.statusCode}');
+    final j = jsonDecode(utf8.decode(r.bodyBytes));
+    if (j is! Map) return const [];
+    final list = j['comments'];
+    if (list is! List) return const [];
+
+    final out = <DanmakuItem>[];
+    for (final c in list) {
+      if (c is! Map) continue;
+      final text = '${c['m'] ?? ''}';
+      if (text.trim().isEmpty) continue;
+      // `p` 格式：时间(秒),模式,颜色,来源标签
+      final p = '${c['p'] ?? ''}'.split(',');
+      if (p.isEmpty) continue;
+      final t = double.tryParse(p[0]) ?? 0;
+      final mode = p.length > 1 ? (int.tryParse(p[1]) ?? 1) : 1;
+      var color = p.length > 2 ? (int.tryParse(p[2]) ?? 0xFFFFFF) : 0xFFFFFF;
+      if (color == 0) color = 0xFFFFFF;
+      final src = p.length > 3 ? p[3].replaceAll(RegExp(r'[\[\]]'), '') : '';
+      out.add(DanmakuItem(
+        timeMs: (t * 1000).round(),
+        text: text,
+        // 聚合源的模式含义与 B站 一致：4 底部 / 5 顶部 / 其它滚动。
+        // 注意实测还出现过 0（renren 源），也按滚动处理。
+        mode: switch (mode) {
+          4 => DanmakuMode.bottom,
+          5 => DanmakuMode.top,
+          _ => DanmakuMode.scroll,
+        },
+        color: color & 0xFFFFFF,
+        source: src.isEmpty ? 'danmu_api' : src,
+      ));
+    }
+    out.sort((a, b) => a.timeMs.compareTo(b.timeMs));
+    return out;
+  }
+
+  void dispose() => _c.close();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  极简 protobuf wire-format 读取器
 // ═══════════════════════════════════════════════════════════════════════════
 

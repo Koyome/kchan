@@ -1,13 +1,15 @@
-/// 弹幕覆盖率抽测（20 部样本）
+/// 弹幕覆盖率对照测试：B站单源 vs 聚合实例
 ///
-/// 用途：给出**可信的覆盖率数字**，而不是拿一两个能用的例子就说「接好了」。
-/// 明确列出未命中的番名，便于判断是「B站确实没有」还是「匹配逻辑有漏」。
+/// 用法：
+///   dart run tool/probe_danmaku_coverage2.dart                    # 仅 B站
+///   dart run tool/probe_danmaku_coverage2.dart http://127.0.0.1:9321
 ///
-/// 跑法：`dart run tool/probe_danmaku_coverage.dart`
+/// 给出两个数字便于对比，并列出仍未覆盖的番名。
 library;
 
 import 'dart:io';
 
+import 'package:kchan/api/danmaku_api.dart';
 import 'package:kchan/api/danmaku_source.dart';
 
 /// (番名, 集数) —— 覆盖近年热门与经典老番
@@ -43,18 +45,22 @@ String _pad(String s, int width) {
   return s + ' ' * (width - w > 0 ? width - w : 0);
 }
 
-Future<void> main() async {
-  final src = BilibiliDanmakuSource();
+Future<void> main(List<String> args) async {
+  final aggUrl = args.isNotEmpty ? args.first : '';
+  final api = DanmakuApi(danmuApiBaseUrl: aggUrl);
+
+  stdout.writeln('=' * 82);
+  stdout.writeln('  弹幕覆盖率测试');
+  stdout.writeln('  可用源: ${api.enabledSourceNames.join(" + ")}');
+  stdout.writeln('=' * 82);
+
   var hit = 0;
   final misses = <String>[];
-
-  stdout.writeln('=' * 78);
-  stdout.writeln('  B站弹幕覆盖率抽测（${_samples.length} 部，第 1 集）');
-  stdout.writeln('=' * 78);
+  final srcTally = <String, int>{};
 
   for (final (title, ep) in _samples) {
     final sw = Stopwatch()..start();
-    final items = await src.fetch(animeTitle: title, episode: ep.toDouble());
+    final items = await api.fetchAll(title, ep.toDouble());
     sw.stop();
     if (items.isEmpty) {
       misses.add(title);
@@ -62,24 +68,30 @@ Future<void> main() async {
           '  [MISS] ${_pad(title, 24)} （${sw.elapsedMilliseconds}ms）');
     } else {
       hit++;
+      for (final i in items) {
+        srcTally[i.source] = (srcTally[i.source] ?? 0) + 1;
+      }
       final span = (items.last.timeMs / 1000).round();
       stdout.writeln('  [HIT ] ${_pad(title, 24)} '
-          '${items.length.toString().padLeft(5)} 条  '
-          '覆盖至 ${span}s  （${sw.elapsedMilliseconds}ms）');
+          '${items.length.toString().padLeft(5)} 条  覆盖至 ${span}s  '
+          '（${sw.elapsedMilliseconds}ms）');
     }
   }
 
-  src.dispose();
+  api.dispose();
   final rate = (100 * hit / _samples.length).round();
   stdout.writeln('');
-  stdout.writeln('=' * 78);
+  stdout.writeln('=' * 82);
   stdout.writeln('  命中 $hit / ${_samples.length}（$rate%）');
-  if (misses.isNotEmpty) {
-    stdout.writeln('  未命中 ${misses.length} 部:');
-    for (final m in misses) {
-      stdout.writeln('    - $m');
-    }
+  if (srcTally.isNotEmpty) {
+    final top = srcTally.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    stdout.writeln('  弹幕来源分布（弹幕条数）: '
+        '${top.take(10).map((e) => '${e.key}=${e.value}').join('  ')}');
   }
-  stdout.writeln('=' * 78);
+  if (misses.isNotEmpty) {
+    stdout.writeln('  未命中 ${misses.length} 部: ${misses.join('、')}');
+  }
+  stdout.writeln('=' * 82);
   exit(0);
 }

@@ -151,6 +151,7 @@ class SettingsStore extends ChangeNotifier {
   static const _kDanmakuAppSecret = 'danmaku_app_secret';
   static const _kDanmakuOpacity = 'danmaku_opacity';
   static const _kDanmakuFontSize = 'danmaku_font_size';
+  static const _kDanmakuApiBaseUrl = 'danmaku_api_base_url';
   // v1.4.0：网络出口（代理）设置
   static const _kProxyFollowSystem = 'proxy_follow_system';
   static const _kProxyManualEnabled = 'proxy_manual_enabled';
@@ -179,6 +180,8 @@ class SettingsStore extends ChangeNotifier {
   double danmakuOpacity = 1.0;
   /// 弹幕字号
   double danmakuFontSize = 16;
+  /// 自建 danmu_api 聚合实例地址（空 = 未配置）
+  String danmakuApiBaseUrl = '';
 
   /// 网络出口：是否跟随系统代理（Windows 读注册表）
   bool proxyFollowSystem = true;
@@ -234,6 +237,7 @@ class SettingsStore extends ChangeNotifier {
       danmakuAppSecret = _sp.getString(_kDanmakuAppSecret) ?? '';
     danmakuOpacity = (_sp.getDouble(_kDanmakuOpacity) ?? 1.0).clamp(0.1, 1.0);
     danmakuFontSize = (_sp.getDouble(_kDanmakuFontSize) ?? 16).clamp(10.0, 40.0);
+    danmakuApiBaseUrl = _sp.getString(_kDanmakuApiBaseUrl) ?? '';
       proxyFollowSystem = _sp.getBool(_kProxyFollowSystem) ?? true;
       proxyManualEnabled = _sp.getBool(_kProxyManualEnabled) ?? false;
       proxyManualUrl = _sp.getString(_kProxyManualUrl) ?? '';
@@ -424,6 +428,13 @@ class SettingsStore extends ChangeNotifier {
     danmakuOpacity = v.clamp(0.1, 1.0);
     notifyListeners();
     await _w(() => _sp.setDouble(_kDanmakuOpacity, danmakuOpacity));
+  }
+
+  /// 设置自建 danmu_api 聚合实例地址
+  Future<void> setDanmakuApiBaseUrl(String v) async {
+    danmakuApiBaseUrl = v.trim();
+    notifyListeners();
+    await _w(() => _sp.setString(_kDanmakuApiBaseUrl, danmakuApiBaseUrl));
   }
 
   /// 设置弹幕字号（10~40）

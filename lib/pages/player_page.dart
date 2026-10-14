@@ -251,6 +251,9 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 当前是否已置「禁止息屏」（避免重复调用 Win32 API）
   bool _keepScreenOn = false;
 
+  /// 本集的弹幕是否已开始加载（保证只加载一次，且与播放后端无关）
+  bool _danmakuLoadStarted = false;
+
   /// 弹幕显示设置（开关 / 透明度 / 字号）
   DanmakuStyle _danmakuStyle = const DanmakuStyle();
 
@@ -260,6 +263,7 @@ class _PlayerPageState extends State<PlayerPage> {
   DanmakuApi _makeDanmakuApi() => DanmakuApi(
         appId: Store.settings.danmakuAppId,
         appSecret: Store.settings.danmakuAppSecret,
+        danmuApiBaseUrl: Store.settings.danmakuApiBaseUrl,
       );
   bool _danmakuVisible = true;
 
@@ -706,6 +710,16 @@ class _PlayerPageState extends State<PlayerPage> {
       final pre = await _preflightPlayable(stream);
       kLog('[播放] 预检 ${pre ? '通过' : '失败(流被拒)'}');
       if (pre) {
+        // ─────────────────────────────────────────────────────────────
+        // 【v2.0.0】在这里就加载弹幕，**不等播放器就绪**。
+        //
+        // 原因：`VideoHandle.network()` 在 media-kit 起播失败时会自动回落 fvp，
+        // 那条路径不会走到「控制器已就绪」分支 —— 导致弹幕静默失效
+        // （实测日志里一条 [弹幕] 都没有）。
+        // 弹幕与视频内核是两件独立的事，放这里与后端选择完全解耦。
+        // ─────────────────────────────────────────────────────────────
+        unawaited(_loadDanmaku());
+
         // 解析成功 → 用本地播放器播（比 WebView 更流畅，支持倍速/拖动）
         setState(() => _statusText = '加载播放器…');
         return _startPlayback(PlayInfo(
@@ -920,6 +934,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _sameSourceRetried = false;
       _danmakus = const []; // 换源/换集后重新拉弹幕
       _danmakuPosMs = 0;
+      _danmakuLoadStarted = false; // 允许新的一集重新加载
     });
   }
 
@@ -1027,6 +1042,19 @@ class _PlayerPageState extends State<PlayerPage> {
     _startOutputWatchdog();
     _e2eAutoFullscreen();
 
+    // ═══════════════════════════════════════════════════════════════════
+    // 【v2.0.0 · 弹幕与播放后端解耦】
+    //
+    // 原来 `_loadDanmaku()` 只在起播成功后调用一次（即 media-kit 成功时）。
+    // 但 `VideoHandle.network()` 内部会在 media-kit 起播失败时**自动回落 fvp**，
+    // 那条路径不会走到这里 —— 实测「media-kit 打开超时 → 回落 fvp」时
+    // **弹幕完全不加载**（日志里一条 [弹幕] 都没有）。
+    //
+    // 弹幕是独立能力，不该依赖视频内核是否成功。所以改为在 `_boot()` 里
+    // 与后端选择无关的位置调用；这里只在尚未开始时兜底一次。
+    // ═══════════════════════════════════════════════════════════════════
+    if (!_danmakuLoadStarted) _loadDanmaku();
+
     controller.addListener(() {
       if (!mounted) return;
       // 【v1.9.9】位置更新时检查是否落进注入广告/前贴区间 → 自动跳过。
@@ -1110,6 +1138,8 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 【原则】弹幕是附加功能：任何失败都只记日志 + 给个轻提示，
   /// **绝不影响视频播放**（不抛异常、不阻塞起播、不改播放状态）。
   Future<void> _loadDanmaku() async {
+    if (_danmakuLoadStarted) return;
+    _danmakuLoadStarted = true;
     if (!Store.settings.danmakuEnabled) return;
     final title = widget.subject.displayName.isNotEmpty
         ? widget.subject.displayName

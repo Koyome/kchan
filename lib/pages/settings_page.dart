@@ -21,6 +21,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final _customBaseCtl = TextEditingController();
   final _imgPrefixCtl = TextEditingController();
   final _danmakuIdCtl = TextEditingController();
+  final _danmakuAggCtl = TextEditingController();
   final _danmakuSecretCtl = TextEditingController();
   final _proxyUrlCtl = TextEditingController();
   bool _probing = false;
@@ -47,6 +48,7 @@ class _SettingsPageState extends State<SettingsPage> {
     super.initState();
     _customBaseCtl.text = Store.settings.customBase;
     _imgPrefixCtl.text = Store.settings.imageProxyPrefix;
+    _danmakuAggCtl.text = Store.settings.danmakuApiBaseUrl;
     _danmakuIdCtl.text = Store.settings.danmakuAppId;
     _danmakuSecretCtl.text = Store.settings.danmakuAppSecret;
     _proxyUrlCtl.text = Store.settings.proxyManualUrl;
@@ -56,6 +58,7 @@ class _SettingsPageState extends State<SettingsPage> {
   void dispose() {
     _customBaseCtl.dispose();
     _imgPrefixCtl.dispose();
+    _danmakuAggCtl.dispose();
     _danmakuIdCtl.dispose();
     _danmakuSecretCtl.dispose();
     _proxyUrlCtl.dispose();
@@ -302,6 +305,77 @@ class _SettingsPageState extends State<SettingsPage> {
               value: Store.settings.danmakuEnabled,
               activeThumbColor: K.accent,
               onChanged: (v) => Store.settings.setDanmakuEnabled(v),
+            ),
+            // ---- 弹幕聚合实例（覆盖率关键）----
+            //
+            // 为什么放在最前面：B站单源实测只覆盖约 85%
+            // （进击的巨人 / 我推的孩子 / Code Geass R2 等版权受限的番拿不到）。
+            // 自建 danmu_api 聚合实例后，这些番都能拿到弹幕。
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+              child: Text(
+                '弹幕聚合实例（强烈建议 · 免费）',
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Store.settings.danmakuApiBaseUrl.isNotEmpty
+                        ? K.accent
+                        : cs.onSurface.withValues(alpha: 0.75)),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+              child: Text(
+                Store.settings.danmakuApiBaseUrl.isNotEmpty
+                    ? '已配置：聚合「爱优腾芒哔巴」等十多个源的弹幕，覆盖率最高'
+                    : '默认只用 B站（免配置），但其番剧库只收录约八成作品，'
+                        '进击的巨人 / 我推的孩子 / Code Geass 这类会没有弹幕。\n'
+                        '部署一个免费聚合实例即可让这些番也有弹幕：'
+                        '打开 github.com/huangxd-/danmu_api 按 README 一键部署到 '
+                        'Vercel / Netlify / Cloudflare，然后把地址填在下面。',
+                style: TextStyle(
+                    fontSize: 11,
+                    height: 1.5,
+                    color: cs.onSurface.withValues(alpha: 0.55)),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _danmakuAggCtl,
+                      decoration: const InputDecoration(
+                        labelText: '聚合实例地址',
+                        hintText: 'https://你的实例.vercel.app',
+                        prefixIcon: Icon(Icons.hub_outlined, size: 18),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: FilledButton(
+                      onPressed: () async {
+                        await Store.settings
+                            .setDanmakuApiBaseUrl(_danmakuAggCtl.text);
+                        if (!context.mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(_danmakuAggCtl.text.trim().isEmpty
+                                ? '已清空，只用 B站弹幕'
+                                : '已保存，下次播放生效'),
+                          ),
+                        );
+                        setState(() {});
+                      },
+                      child: const Text('保存'),
+                    ),
+                  ),
+                ],
+              ),
             ),
             if (Store.settings.danmakuEnabled)
               Padding(
