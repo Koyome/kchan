@@ -1,0 +1,75 @@
+# ─────────────────────────────────────────────────────────────────────────
+#  Kchan .gitignore
+#
+#  说明：Flutter 默认模板只忽略根目录的 /build/ 与 .dart_tool/，
+#  但本项目有三个「体积陷阱」必须显式排除（均为实测值）：
+#    · build/                    1.5 GB（APK、AOT kernel、gradle 中间件）
+#    · android/.gradle           14.5 MB（gradle 本地缓存）
+#    · android/app/build/        约 25 MB（**gradle 把 build/ 重定向到了这里**）
+#  最后一条尤其容易漏：默认的 `/build/` 只锚定仓库根目录，匹配不到
+#  `android/app/build/`，实测它会带进 28 个文件、含两个 12 MB 的 app.so。
+# 不排除的话仓库会超过 1.5 GB，clone 基本不可用。
+# ─────────────────────────────────────────────────────────────────────────
+
+# ── Flutter / Dart 构建产物 ──
+# 用 `build/`（不带前导斜杠）匹配**任意层级**的 build 目录。
+# 安全性：`android/app/src` 等源码目录不含名为 build 的路径段，
+# 所以这个宽匹配不会误伤源码。
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub/
+.pub-cache/
+/coverage/
+**/doc/api/
+**/ios/Flutter/.last_build_id
+
+# ── 符号化 / 混淆产物 ──
+app.*.symbols
+app.*.map.json
+
+# ── Android ──
+/android/.gradle/
+/android/local.properties
+/android/app/debug
+/android/app/profile
+/android/app/release
+/android/key.properties
+*.jks
+*.keystore
+
+# ── Windows ──
+# 注意：windows/runner/*.cpp 与 *.h 是**源码，必须入库**。
+# （开发机的 MinGW 工具链损坏导致无法重新链接 exe，但源码完整，
+#   其他人 clone 后可以正常构建。）
+/windows/flutter/ephemeral/
+
+# ── IDE ──
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+*.swp
+
+# ── 本项目构建脚本的痕迹 ──
+# `staged` 是 flutter assemble 的 shim 标记（103 字节），不是源码
+/staged
+*.log
+kchan_diag.log
+kchan_startup.log
+
+# ── 其它 ──
+*.class
+*.pyc
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+.widget_preview/

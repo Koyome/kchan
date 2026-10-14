@@ -1,0 +1,68 @@
+name: kchan
+description: "Kchan - Bangumi metadata + aggregated anime sources, local-first player"
+publish_to: 'none'
+version: 1.9.9+15
+
+environment:
+  sdk: ^3.9.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # 网络与解析
+  http: ^1.2.2
+  # 本地存储
+  shared_preferences: ^2.3.2
+  path_provider: ^2.1.4
+  # 播放器：media-kit(libmpv) 为主（v1.9.0 起），video_player+fvp 为运行时兜底
+  media_kit: ^1.2.6
+  media_kit_video: ^1.3.1
+  video_player: ^2.9.2
+  fvp: ^0.39.0
+  # 图片缓存
+  cached_network_image: ^3.4.1
+  # 规则引擎：XPath（对齐 Kazumi 的 JSON+XPath 规则格式）
+  html: ^0.15.5
+  # WebView：解析 jx 云播放器的真实播放地址（HTML 里是空的，必须跑 JS）
+  webview_flutter: ^4.14.1
+  # Windows 本地解析：无头 Edge + CDP（纯 Dart，见 lib/api/edge_cdp_resolver.dart）
+  web_socket_channel: ^3.0.3
+  # 弹弹play 弹幕签名（SHA-256）
+  crypto: ^3.0.0
+  # 系统代理：dart:ffi 的内存分配辅助（calloc）
+  ffi: ^2.1.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+
+  # Kazumi 规则库（运行期加载，AOT 树摇不会消除 JSON 资产）
+  assets:
+    - assets/rules/kazumi_rules.json
+
+  # 内置中文衬线 + 无衬线（Noto Serif SC / Noto Sans SC 静态子集）
+  # 让标题呈现纸墨感、正文清晰，全平台字体一致，不依赖系统字体
+  fonts:
+    - family: KSerif
+      fonts:
+        - asset: assets/fonts/serif-400.ttf
+          weight: 400
+        - asset: assets/fonts/serif-500.ttf
+          weight: 500
+        - asset: assets/fonts/serif-600.ttf
+          weight: 600
+    - family: KSans
+      fonts:
+        - asset: assets/fonts/sans-400.ttf
+          weight: 400
+        - asset: assets/fonts/sans-500.ttf
+          weight: 500
+        - asset: assets/fonts/sans-700.ttf
+          weight: 700
