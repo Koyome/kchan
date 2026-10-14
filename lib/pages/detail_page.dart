@@ -165,11 +165,28 @@ class _DetailPageState extends State<DetailPage> {
     // 快车道：先跑，出结果立即渲染
     final fastPending = [for (final s in fast) _runOneSource(s, title)];
 
-    // 补充车道：等快车道全部有结论后再发（避免抢带宽把首屏拖慢）
+    // 补充车道：**第一条快车道出结果后**就陆续发车。
+    //
+    // 【v2.0.0 优化】旧实现是 `await Future.wait(fastPending)` —— 要等
+    // **全部**快车道都结束才启动补充车道，于是最慢的那条（实测有 8s 超时的）
+    // 会卡住后面所有源。现在改成「第一条回来就走」，并给每条之间留一点间隔：
+    //   · 快车道的首选源约 0.3~1s 就有结论 → 补充车道能提前 1~2s 启动；
+    //   · 间隔是为了不和快车道抢带宽（实测同时发 6 条会把首屏拖慢）。
     unawaited(() async {
-      await Future.wait(fastPending);
+      // 等到「至少一条快车道有结论」，或兜底等全部（防止某条永不返回）
+      await Future.any([
+        Future.wait(fastPending),
+        // fastPending 里谁先完成就放行
+        ...fastPending.map((f) => f.then((_) => null)),
+      ]);
       if (!mounted) return;
-      final restPending = [for (final s in rest) _runOneSource(s, title)];
+      final restPending = <Future<void>>[];
+      for (final s in rest) {
+        restPending.add(_runOneSource(s, title));
+        // 每条之间错开 250ms，避免瞬间挤满连接
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        if (!mounted) return;
+      }
       await Future.wait(restPending);
       if (mounted) setState(() => _sourceLoading = false);
     }());

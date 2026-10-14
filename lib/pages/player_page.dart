@@ -22,6 +22,7 @@ import 'package:webview_flutter/webview_flutter.dart' as wv;
 
 import '../api/danmaku_api.dart';
 import '../api/danmaku_source.dart';
+import '../api/child_process_manager.dart';
 import '../api/diag_log.dart' show kLog;
 import '../api/kazumi_rules.dart';
 import '../api/player_backend.dart';
@@ -265,7 +266,6 @@ class _PlayerPageState extends State<PlayerPage> {
         appSecret: Store.settings.danmakuAppSecret,
         danmuApiBaseUrl: Store.settings.danmakuApiBaseUrl,
       );
-  bool _danmakuVisible = true;
 
   bool get _isAndroid => !kIsWeb && Platform.isAndroid;
 
@@ -296,6 +296,53 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   // ───────────────────── 键盘快捷键 ─────────────────────
+
+  /// 切换弹幕显示（右上角按钮 / `D` 键共用）
+  ///
+  /// 【v2.0.0 修「弹幕能开不能关」】
+  /// 原先存在**两个互不相干的状态**：
+  ///   · `_danmakuVisible` —— 按钮与 `D` 键改的是它，但它只用于图标显隐；
+  ///   · `_danmakuStyle.enabled` —— `DanmakuLayer` 真正读取的就是它。
+  /// 两者从不同步，而 `DanmakuLayer.didUpdateWidget` 只在「样式变化」时
+  /// 调 `controller.updateOption()`，样式没变 → 弹幕照旧 → 关不掉。
+  ///
+  /// 现在合并为单一事实来源，切换后就地更新 `_danmakuStyle`，
+  /// 由 `didUpdateWidget` → `_applyStyle()` → `hideScroll/hideTop/hideBottom`
+  /// 真正隐藏/恢复。
+  void _toggleDanmaku() {
+    final on = !_danmakuStyle.enabled;
+    setState(() {
+      _danmakuStyle = _danmakuStyle.copyWith(enabled: on);
+    });
+    _showHint(on ? '弹幕：开' : '弹幕：关');
+  }
+
+  bool _e2eToggleDone = false;
+
+  /// 【自检】`KCHAN_E2E_DANMAKU_TOGGLE=1` 时，起播 12 秒后自动关一次、
+  /// 18 秒后再开，用于验证「关得掉、开得回来」。
+  ///
+  /// 是否真的生效看两行日志：
+  ///   `[自检] 弹幕开关 → 关`（页面状态）
+  ///   `[弹幕] 显示开关 → 关`（DanmakuLayer 真正下发给渲染库）
+  /// 后者缺失就说明状态没传到渲染层 —— 正是原 bug 的形态。
+  void _e2eDanmakuToggle() {
+    if (_e2eToggleDone) return;
+    if (Platform.environment['KCHAN_E2E_DANMAKU_TOGGLE'] != '1') return;
+    _e2eToggleDone = true;
+    Timer(const Duration(seconds: 12), () {
+      if (!mounted) return;
+      kLog('[自检] 弹幕开关 → 关（切换前 enabled=${_danmakuStyle.enabled}）');
+      _toggleDanmaku();
+      kLog('[自检] 切换后 enabled=${_danmakuStyle.enabled}');
+    });
+    Timer(const Duration(seconds: 18), () {
+      if (!mounted) return;
+      kLog('[自检] 弹幕开关 → 开（切换前 enabled=${_danmakuStyle.enabled}）');
+      _toggleDanmaku();
+      kLog('[自检] 切换后 enabled=${_danmakuStyle.enabled}');
+    });
+  }
 
   /// 屏幕中央短暂提示（快捷键反馈）
   void _showHint(String text) {
@@ -419,8 +466,8 @@ class _PlayerPageState extends State<PlayerPage> {
         return KeyEventResult.handled;
       case LogicalKeyboardKey.keyD:
         if (repeat) return KeyEventResult.handled;
-        setState(() => _danmakuVisible = !_danmakuVisible);
-        _showHint(_danmakuVisible ? '弹幕：开' : '弹幕：关');
+        // 与右上角按钮共用同一实现，避免两处状态再次分叉
+        _toggleDanmaku();
         return KeyEventResult.handled;
       case LogicalKeyboardKey.keyX:
         _stepSpeed(1);
@@ -606,6 +653,17 @@ class _PlayerPageState extends State<PlayerPage> {
 
     if (freshAttempt) _triedSources.clear();
     if (rule != null) _triedSources.add(rule.name);
+
+    // 【自检】`KCHAN_E2E_PLAY_URL=<直链>` —— 直接播该地址，完全绕过线路解析。
+    //
+    // 用途：验证弹幕开关、看门狗、防息屏等功能时，不该被「解析源恰好挂了」
+    // 干扰（实测某些时段资源站集体不可达，导致所有依赖起播的验证都跑不起来）。
+    final e2eUrl = Platform.environment['KCHAN_E2E_PLAY_URL'];
+    if (e2eUrl != null && e2eUrl.isNotEmpty) {
+      kLog('[自检] 使用 KCHAN_E2E_PLAY_URL 直接起播，跳过解析');
+      await _startPlayback(PlayInfo(url: e2eUrl));
+      return;
+    }
 
     // 已经有直链（历史续播）：直接播
     if (widget.playUrl != null &&
@@ -1042,6 +1100,14 @@ class _PlayerPageState extends State<PlayerPage> {
     _startOutputWatchdog();
     _e2eAutoFullscreen();
 
+    // 播放期间定期回收遗留的浏览器进程（安全网）。
+    //
+    // 【为什么需要】正常退出会走 AppLifecycleListener 回收子进程，
+    // 但**被强杀 / 崩溃**时那个钩子不执行 —— 实测一次运行能留下
+    // 14~15 个孤儿 msedge 进程，连看几集就攒到几十个，占内存拖慢系统。
+    // reapStale 只杀「存在超过 120 秒」的同类进程，正在解析的那个绝不会被误杀。
+    unawaited(ChildProcessManager.instance.reapStale());
+
     // ═══════════════════════════════════════════════════════════════════
     // 【v2.0.0 · 弹幕与播放后端解耦】
     //
@@ -1054,6 +1120,7 @@ class _PlayerPageState extends State<PlayerPage> {
     // 与后端选择无关的位置调用；这里只在尚未开始时兜底一次。
     // ═══════════════════════════════════════════════════════════════════
     if (!_danmakuLoadStarted) _loadDanmaku();
+    _e2eDanmakuToggle(); // 自检：验证弹幕开关能关能开
 
     controller.addListener(() {
       if (!mounted) return;
@@ -1266,6 +1333,10 @@ class _PlayerPageState extends State<PlayerPage> {
         return;
       }
       if (_recovering) return;
+
+      // 顺带做周期性的遗留进程回收（内部有 45 秒节流，几乎零开销）。
+      // 放在看门狗里是因为它本来就在稳定跳动，不需要再开一个定时器。
+      unawaited(ChildProcessManager.instance.reapStale());
 
       final fps = await c.videoOutputFps();
       // 心跳：每 10 次探测（约 30s）记一行，用于确认探针真的在工作。
@@ -2236,13 +2307,19 @@ class _PlayerPageState extends State<PlayerPage> {
             ),
             if (_danmakus.isNotEmpty)
               IconButton(
-                onPressed: () => setState(() => _danmakuVisible = !_danmakuVisible),
+                // 【v2.0.0 修】原来改的是 `_danmakuVisible` —— 那是**另一个**
+                // 独立状态，只控制图标显隐，从不同步到 DanmakuLayer 真正读的
+                // `_danmakuStyle.enabled`，所以「能开不能关」。
+                // 现已合并为单一状态，按钮与 D 键共用 _toggleDanmaku()。
+                onPressed: _toggleDanmaku,
                 icon: Icon(
-                  _danmakuVisible ? Icons.subtitles : Icons.subtitles_off_outlined,
+                  _danmakuStyle.enabled
+                      ? Icons.subtitles
+                      : Icons.subtitles_off_outlined,
                   color: Colors.white,
                   size: 20,
                 ),
-                tooltip: _danmakuVisible ? '关闭弹幕' : '打开弹幕',
+                tooltip: _danmakuStyle.enabled ? '关闭弹幕' : '打开弹幕',
               ),
             IconButton(
               onPressed: () =>

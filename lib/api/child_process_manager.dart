@@ -79,9 +79,15 @@ class ChildProcessManager {
       if (r.exitCode == 0) {
         kLog('[进程] 已终止进程树 $tag pid=$pid');
       } else {
-        // 进程可能已经自己退出了 —— 不算错误
-        final err = r.stderr.toString().trim();
-        kLog('[进程] 终止 pid=$pid 返回 ${r.exitCode}${err.isEmpty ? '' : '（$err）'}');
+        // 【降噪】退出码 128 = 「没有找到进程」—— 说明它已经自己退出了。
+        // 清扫孤儿时这是**最常见**的情况（父进程杀掉后子进程很快自己也没了），
+        // 实测一轮能刷 14 行无意义日志，把真正有用的信息埋掉。
+        final err = r.stderr.toString();
+        if (err.contains('没有找到进程') || r.exitCode == 128) {
+          return; // 静默：目标已消失，符合预期
+        }
+        kLog('[进程] 终止 pid=$pid 返回 ${r.exitCode}'
+            '${err.trim().isEmpty ? '' : '（${err.trim()}）'}');
       }
     } catch (e) {
       kLog('[进程] 终止 pid=$pid 异常: $e');
@@ -124,19 +130,61 @@ class ChildProcessManager {
     if (_swept) return;
     _swept = true;
     if (!Platform.isWindows) return;
+    await _killByMarker(tag: 'orphan');
+    _lastSweep = DateTime.now();
+  }
+
+  /// 上一次清扫时间（节流用）
+  DateTime? _lastSweep;
+
+  /// 运行期**周期性**回收遗留浏览器进程（安全网）。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// 正常退出走 `AppLifecycleListener.onExitRequested` → [reapAll]。
+  /// 但**崩溃 / 被任务管理器强杀 / 被 Stop-Process 杀掉**时，
+  /// 那个钩子不会执行 —— 实测一次运行能留下 14~15 个孤儿浏览器进程，
+  /// 下次启动才被 [sweepOrphans] 清掉。
+  ///
+  /// 对用户的实际影响：连着看几集、期间应用被强杀过一次，
+  /// 后台就会攒着几十个 msedge 进程占内存 —— 正是「播放体验变卡」的来源之一。
+  ///
+  /// ## 安全性
+  ///
+  /// 用 [minAge] 保证只杀「存在超过 N 秒」的进程。
+  /// 当前正在用于解析的浏览器刚启动不久，绝不会被误杀。
+  Future<void> reapStale({Duration minAge = const Duration(seconds: 120)}) async {
+    if (!Platform.isWindows) return;
+    // 节流：最多每 45 秒扫一次，避免频繁起 powershell 反而拖慢
+    final now = DateTime.now();
+    if (_lastSweep != null && now.difference(_lastSweep!).inSeconds < 45) {
+      return;
+    }
+    _lastSweep = now;
+    await _killByMarker(
+      tag: 'stale',
+      extraFilter: "\$_.CreationDate -lt (Get-Date).AddSeconds(-${minAge.inSeconds})",
+    );
+  }
+
+  /// 按 `kchan-edge-` 标记查找并终止浏览器进程
+  ///
+  /// [extraFilter] 追加到 Where-Object 里（如按创建时间过滤）。
+  Future<void> _killByMarker({required String tag, String? extraFilter}) async {
     try {
-      // 匹配规则：命令行里同时含 "msedge" 与我们的临时目录标记
       final marker = 'kchan-edge-';
+      final cond = StringBuffer("\$_.CommandLine -like '*$marker*'");
+      if (extraFilter != null) cond.write(' -and $extraFilter');
       final ps = '''
 Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" |
-  Where-Object { \$_.CommandLine -like '*$marker*' } |
+  Where-Object { $cond } |
   ForEach-Object { \$_.ProcessId }
 ''';
       final r = await Process.run(
         'powershell',
         ['-NoProfile', '-NonInteractive', '-Command', ps],
         runInShell: false,
-      ).timeout(const Duration(seconds: 20));
+      ).timeout(const Duration(seconds: 25));
       final pids = r.stdout
           .toString()
           .split(RegExp(r'\r?\n'))
@@ -146,15 +194,15 @@ Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" |
           .whereType<int>()
           .toList();
       if (pids.isEmpty) {
-        kLog('[进程] 未发现上次遗留的浏览器进程');
+        if (tag == 'orphan') kLog('[进程] 未发现上次遗留的浏览器进程');
         return;
       }
-      kLog('[进程] 发现 ${pids.length} 个上次遗留的浏览器进程，正在清理');
+      kLog('[进程] 发现 ${pids.length} 个$tag浏览器进程，正在清理');
       for (final pid in pids) {
-        await killTree(pid, tag: 'orphan');
+        await killTree(pid, tag: tag);
       }
     } catch (e) {
-      kLog('[进程] 孤儿回收失败（忽略）: $e');
+      kLog('[进程] 清扫浏览器进程失败（忽略）: $e');
     }
   }
 }

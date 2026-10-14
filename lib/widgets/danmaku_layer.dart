@@ -153,7 +153,19 @@ class DanmakuLayerState extends State<DanmakuLayer> {
       hideBottom: !on,
       hideSpecial: !on,
     ));
+    // 打一行日志，便于确认开关真的生效（排查「能开不能关」时靠它定位）。
+    // 只在状态变化时打印，不会刷屏。
+    if (_lastAppliedEnabled != on) {
+      _lastAppliedEnabled = on;
+      kLog('[弹幕] 显示开关 → ${on ? "开" : "关"}'
+          '（hideScroll=${
+          !on} fontSize=${widget.style.fontSize.toStringAsFixed(0)}'
+          ' opacity=${widget.style.opacity.toStringAsFixed(2)}）');
+    }
   }
+
+  /// 上一次已应用的开关状态（用于日志去重）
+  bool? _lastAppliedEnabled;
 
   /// 按当前播放位置发射到点的弹幕；检测到 seek 则重同步
   void _pump() {
