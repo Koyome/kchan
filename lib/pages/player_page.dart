@@ -22,7 +22,6 @@ import 'package:webview_flutter/webview_flutter.dart' as wv;
 
 import '../api/danmaku_api.dart';
 import '../api/danmaku_source.dart';
-import '../api/child_process_manager.dart';
 import '../api/diag_log.dart' show kLog;
 import '../api/kazumi_rules.dart';
 import '../api/player_backend.dart';
@@ -656,11 +655,15 @@ class _PlayerPageState extends State<PlayerPage> {
 
     // 【自检】`KCHAN_E2E_PLAY_URL=<直链>` —— 直接播该地址，完全绕过线路解析。
     //
-    // 用途：验证弹幕开关、看门狗、防息屏等功能时，不该被「解析源恰好挂了」
-    // 干扰（实测某些时段资源站集体不可达，导致所有依赖起播的验证都跑不起来）。
+    // 用途：验证弹幕开关、看门狗、防息屏时，不该被「解析源恰好挂了」干扰
+    // （实测某些时段资源站集体不可达，导致所有依赖起播的验证都跑不起来）。
+    //
+    // 【注意】这里也要先触发弹幕加载 —— 否则走这条捷径时弹幕根本不会加载
+    // （踩过：验证弹幕开关却看不到 [弹幕] 日志，误以为开关修复坏了）。
     final e2eUrl = Platform.environment['KCHAN_E2E_PLAY_URL'];
     if (e2eUrl != null && e2eUrl.isNotEmpty) {
       kLog('[自检] 使用 KCHAN_E2E_PLAY_URL 直接起播，跳过解析');
+      unawaited(_loadDanmaku());
       await _startPlayback(PlayInfo(url: e2eUrl));
       return;
     }
@@ -1100,13 +1103,6 @@ class _PlayerPageState extends State<PlayerPage> {
     _startOutputWatchdog();
     _e2eAutoFullscreen();
 
-    // 播放期间定期回收遗留的浏览器进程（安全网）。
-    //
-    // 【为什么需要】正常退出会走 AppLifecycleListener 回收子进程，
-    // 但**被强杀 / 崩溃**时那个钩子不执行 —— 实测一次运行能留下
-    // 14~15 个孤儿 msedge 进程，连看几集就攒到几十个，占内存拖慢系统。
-    // reapStale 只杀「存在超过 120 秒」的同类进程，正在解析的那个绝不会被误杀。
-    unawaited(ChildProcessManager.instance.reapStale());
 
     // ═══════════════════════════════════════════════════════════════════
     // 【v2.0.0 · 弹幕与播放后端解耦】
@@ -1333,10 +1329,6 @@ class _PlayerPageState extends State<PlayerPage> {
         return;
       }
       if (_recovering) return;
-
-      // 顺带做周期性的遗留进程回收（内部有 45 秒节流，几乎零开销）。
-      // 放在看门狗里是因为它本来就在稳定跳动，不需要再开一个定时器。
-      unawaited(ChildProcessManager.instance.reapStale());
 
       final fps = await c.videoOutputFps();
       // 心跳：每 10 次探测（约 30s）记一行，用于确认探针真的在工作。
