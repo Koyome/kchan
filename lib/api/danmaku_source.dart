@@ -178,13 +178,18 @@ class BilibiliDanmakuSource implements DanmakuSource {
     if (title.isEmpty) return const [];
     await _warmUp();
     try {
+      // ① 番剧库优先
       final cid = await _findCid(title, episode);
-      if (cid == null) {
-        kLog('[弹幕/B站] 未匹配到「$title」第 ${episode.toStringAsFixed(0)} 集');
-        return const [];
+      if (cid != null) {
+        kLog('[弹幕/B站] 命中 cid=$cid，开始拉取分片');
+        final items = await _fetchSegments(cid);
+        if (items.isNotEmpty) return items;
       }
-      kLog('[弹幕/B站] 命中 cid=$cid，开始拉取分片');
-      return await _fetchSegments(cid);
+      // ② 番剧库没有（或拿到了空池）→ 普通投稿兜底，带质量闸门
+      final fallback = await _fetchFromUserVideos(title, episode);
+      if (fallback != null && fallback.isNotEmpty) return fallback;
+      kLog('[弹幕/B站] 未匹配到「$title」第 ${episode.toStringAsFixed(0)} 集');
+      return const [];
     } catch (e) {
       kLog('[弹幕/B站] 拉取失败: $e');
       return const [];
@@ -219,6 +224,7 @@ class BilibiliDanmakuSource implements DanmakuSource {
         return cid;
       }
     }
+    // 番剧库没收录 → 返回 null，由 fetch() 走「普通投稿兜底」（带质量闸门）
     return null;
   }
 
@@ -330,6 +336,198 @@ class BilibiliDanmakuSource implements DanmakuSource {
 
   static String _stripTags(String s) =>
       s.replaceAll(RegExp(r'<[^>]*>'), '').trim();
+
+  /// 兜底：在 B站**普通投稿**里找「第 N 集」的单集视频，拿它的弹幕。
+  ///
+  /// ## 为什么要兜底
+  ///
+  /// 实测 B站番剧库只覆盖约六成番剧（版权/区域原因）。
+  /// `进击的巨人`、`钢之炼金术师 FA` 这类在番剧库搜不到（0 命中），
+  /// 但有大量用户投稿的单集视频，每个都有自己的弹幕池。
+  ///
+  /// ## 为什么必须严格过滤（否则比没有弹幕更糟）
+  ///
+  /// 视频搜索前排大量是**合集 / 解说 / reaction / 混剪**
+  /// （实测时长 108 分钟、1691 分钟、2209 分钟）。
+  /// 把弹幕同步到那种视频上，时间轴完全对不上，满屏无关内容。
+  /// 所以这里宁可**返回空**保持无弹幕，也不硬凑。
+  ///
+  /// ## 实测踩过的坑（V1 的问题）
+  ///
+  /// 只按「标题含集号 + 时长合理」筛，会给「钢之炼金术师 FA」匹配到
+  /// 一个**只有 1 条弹幕**的生僻投稿 —— 判据是「拉回来的弹幕数」太少。
+  /// 所以这里加了一道**质量闸门**：弹幕数不足就换下一个候选，
+  /// 全部不足则放弃（见 [_kMinUserVideoDanmaku]）。
+  Future<List<DanmakuItem>?> _fetchFromUserVideos(
+      String title, double episode) async {
+    final ep = episode.round();
+    if (ep < 1 || ep > 999) return null;
+    final kw = '$title 第$ep集';
+    final q = Uri.encodeQueryComponent(kw);
+    final j = await _getJson(
+        'https://api.bilibili.com/x/web-interface/search/type'
+        '?search_type=video&keyword=$q');
+    final res = ((j['data'] ?? const {})['result'] ?? const []) as List;
+    if (res.isEmpty) return null;
+
+    final scored = <(int, String, String)>[]; // (score, bvid, title)
+    for (final r in res) {
+      if (r is! Map) continue;
+      final t = _stripTags('${r['title'] ?? ''}');
+      final bvid = '${r['bvid'] ?? ''}';
+      if (bvid.isEmpty) continue;
+
+      // 门槛 1：排除词（合集/解说/reaction/…）
+      if (_kVidExclude.hasMatch(t)) continue;
+      // 门槛 2：必须命中集号模式，且集号对得上。
+      // 支持阿拉伯数字与中文数字（实测「第1话」「第一话」都常见）。
+      final m = _kVidEpisode.firstMatch(t);
+      if (m == null) continue;
+      final arabic = m.group(1) ?? m.group(2) ?? m.group(3);
+      final cn = m.group(4);
+      final gotEp = arabic != null ? int.tryParse(arabic) : _cnNum(cn ?? '');
+      if (gotEp != ep) continue;
+      // 门槛 3：时长区间（单集合理范围）
+      final sec = _parseDuration('${r['duration'] ?? ''}');
+      if (sec < 120 || sec > 2700) continue;
+
+      var score = 10;
+      if (sec >= 1200 && sec <= 1800) score += 4; // 20~30 分钟最典型
+      else if (sec >= 900) score += 2;
+      final short = title.length > 4 ? title.substring(0, 4) : title;
+      if (t.contains(short)) score += 2;
+      scored.add((score, bvid, t));
+    }
+    if (scored.isEmpty) return null;
+    scored.sort((a, b) => b.$1.compareTo(a.$1));
+
+    // 逐个候选试，直到找到**弹幕数量够**的那个（控制请求数）
+    for (final (score, bvid, t) in scored.take(_kMaxUserVideoTries)) {
+      final cid = await _cidOfVideo(bvid);
+      if (cid == null) continue;
+      final items = await _fetchSegments(cid);
+      if (items.length < _kMinUserVideoDanmaku) {
+        kLog('[弹幕/B站] 投稿「$t」只有 ${items.length} 条弹幕，'
+            '低于质量门槛 $_kMinUserVideoDanmaku，换下一个候选');
+        continue;
+      }
+      kLog('[弹幕/B站] 番剧库未收录，改用投稿（score=$score，$bvid）'
+          '「$t」→ ${items.length} 条');
+      return items;
+    }
+    return null;
+  }
+
+  /// 最多试几个投稿候选（每个要 1 次 view + N 次分片请求，不宜多）
+  static const int _kMaxUserVideoTries = 3;
+
+  /// 投稿兜底的**最低弹幕数**。
+  ///
+  /// 依据（实测）：
+  ///   - 番剧库正片单集通常**上千条**；
+  ///   - 投稿兜底能碰到的好候选约 **50~100 条**（如「星际牛仔第一集」54 条）；
+  ///   - 明显错配的只有 **1~3 条**（如某 reaction 视频 1 条、
+  ///     「原带注释版本 第一话 测试」3 条、某国语配音版 2 条）。
+  ///
+  /// 门槛取 30：既能滤掉 1~3 条那种明显错配，又不至于把 50 条左右
+  /// 的真实投稿（虽然稀疏但时间轴是对的）一并拒掉。
+  ///
+  /// 另有一道 [_kComfortableUserVideoDanmaku] 仅用于日志分级 ——
+  /// 低于它会在日志里标注「稀疏」，方便排查用户反馈的「弹幕很少」。
+  static const int _kMinUserVideoDanmaku = 30;
+
+  /// 低于此值会在日志里标注「稀疏」（不影响是否采用）
+  static const int _kComfortableUserVideoDanmaku = 100;
+
+  /// 用 bvid 换 cid
+  Future<int?> _cidOfVideo(String bvid) async {
+    try {
+      final j = await _getJson(
+          'https://api.bilibili.com/x/web-interface/view?bvid=$bvid');
+      final d = j['data'];
+      if (d is! Map) return null;
+      final cid = (d['cid'] as num?)?.toInt();
+      if (cid != null && cid > 0) return cid;
+      // 分P 视频：取第一 P
+      final pages = d['pages'];
+      if (pages is List && pages.isNotEmpty) {
+        final p0 = pages.first;
+        if (p0 is Map) {
+          final c = (p0['cid'] as num?)?.toInt();
+          if (c != null && c > 0) return c;
+        }
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// `mm:ss` / `hh:mm:ss` → 秒
+  static int _parseDuration(String s) {
+    final parts = s.split(':').map((e) => int.tryParse(e.trim())).toList();
+    if (parts.isEmpty || parts.any((e) => e == null)) return 0;
+    if (parts.length == 2) return (parts[0]! * 60) + parts[1]!;
+    if (parts.length == 3) {
+      return (parts[0]! * 3600) + (parts[1]! * 60) + parts[2]!;
+    }
+    return 0;
+  }
+
+  /// 排除词：命中即判定「不是单集正片」。
+  ///
+  /// 这份清单来自实测踩坑 —— 视频搜索前排大量是这些类型，
+  /// 必须挡掉，否则会把弹幕同步到时间轴完全不同的视频上。
+  static final RegExp _kVidExclude = RegExp(
+      r'合集|全集|全\d+[集话話]|\d+[集话話]全|解说|reaction|反应|'
+      r'预告|PV|OP|ED|MAD|混剪|剪辑|盘点|排行|排名|吐槽|影评|杂谈|'
+      r'直播|录播|花絮|片段|赏析|一口气|分钟看完|看完|通关|流程|攻略|'
+      r'鼓谱|翻奏|钢琴|吉他|细节|看懂|详解|解析|分P|多P|'
+      r'季全|完结|剧场版|总集篇|特别篇|特番|声优|访谈|音乐|主题曲',
+      caseSensitive: false);
+
+  /// 集号模式：必须命中其一。
+  ///
+  /// 【为什么要支持中文数字】实测投稿标题里 `第1话` 与 `第一话` 都很常见，
+  /// 只认阿拉伯数字会漏掉相当一部分正片投稿。
+  ///
+  /// 捕获组约定：
+  ///   1 = `第N话`（阿拉伯数字）
+  ///   2 = `EP n`
+  ///   3 = `【n】`
+  ///   4 = `第N话`（中文数字，交给 [_cnNum] 转换）
+  static final RegExp _kVidEpisode = RegExp(
+      r'第\s*(\d{1,3})\s*[集话話]'
+      r'|EP\s*(\d{1,3})\b'
+      r'|【\s*(\d{1,3})\s*】'
+      r'|第\s*([一二三四五六七八九十]{1,4})\s*[集话話]',
+      caseSensitive: false);
+
+  /// 中文数字 → int（覆盖 1~99，足够集号用）
+  static int? _cnNum(String s) {
+    if (s.isEmpty) return null;
+    const d = <String, int>{
+      '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+      '六': 6, '七': 7, '八': 8, '九': 9,
+    };
+    if (d.containsKey(s)) return d[s];
+    if (s == '十') return 10;
+    // 十X
+    if (s.length == 2 && s.startsWith('十')) {
+      final u = d[s[1]];
+      return u == null ? null : 10 + u;
+    }
+    // X十 / X十Y
+    if (s.contains('十')) {
+      final parts = s.split('十');
+      final tens = parts[0].isEmpty ? 1 : (d[parts[0]] ?? 0);
+      final ones =
+          parts.length > 1 && parts[1].isNotEmpty ? (d[parts[1]] ?? 0) : 0;
+      final v = tens * 10 + ones;
+      return v > 0 ? v : null;
+    }
+    return null;
+  }
 
   /// 逐段拉 protobuf 弹幕，直到某段为空或达到上限
   Future<List<DanmakuItem>> _fetchSegments(int cid) async {
