@@ -1,217 +1,254 @@
-/// 弹幕渲染层：轻量自绘实现（滚动 / 顶部 / 底部）
+/// 弹幕渲染层（基于 `canvas_danmaku`）
 ///
-/// 设计要点：
-///  - 用 `Ticker` 驱动，每帧读取播放器 position，按弹幕的 time 轴投放；
-///  - 滚动弹幕走「泳道」：同一条泳道内前后弹幕不重叠（简化：前一条没
-///    完全进场就不发下一条）；
-///  - 顶部/底部弹幕居中静止显示 5 秒；
-///  - 进度回退（拖进度条）时清空在场弹幕重新投放；
-///  - 不做任何原生依赖，Android / Windows 行为一致。
+/// ## 为什么换掉原来的自绘实现
+///
+/// 原来这里是手写的 `Ticker` + `CustomPaint`。换成 `canvas_danmaku` 的收益：
+///   - **轨道分配**：同轨道防重叠算法比自写的「前一条没完全进场就不发下一条」精确
+///   - **分层重绘**：滚动层与静止层分开，静止层只在需要时重绘；
+///     无弹幕时 Ticker 自动停止，不空转耗电
+///   - **字形缓存**：每条弹幕的文字只渲染一次成 `ui.Image`，之后直接 drawImage
+///   - 已内建 `IgnorePointer`，不会吞掉播放器的手势
+///
+/// ## 关键约束（决定了本文件的代码结构）
+///
+/// **`canvas_danmaku` 完全没有时间轴概念。**
+/// `DanmakuContentItem` 没有时间字段，controller 也没有 `seek`/`setPosition`。
+/// 它只知道「现在」。所以：
+///
+///   - 所有按时间调度的逻辑必须由**我们自己**从播放器 position 驱动；
+///   - 正常播放时维护游标 `_cursor`，到点就 `addDanmaku`；
+///   - 位置**大幅后退**（拖了进度条）时 `clear()` + 重注入最近一个时间窗。
+///
+/// ## 两个必须知道的库行为
+///
+/// 1. **重建 widget 改不了样式**：`DanmakuScreen` 只在 `initState` 读一次
+///    `option`，没有 `didUpdateWidget`。所以修改字号/透明度**必须**走
+///    `controller.updateOption(...)`，传新 option 重建是无效的。
+/// 2. **`hideXxx` 从 false 改 true 会立即清空该类型在场弹幕**，改回 false
+///    不会恢复。所以「关弹幕再开」会有一段空白 —— 这是库的行为，已在
+///    `_applyStyle` 注释里标明。
+///
+/// ## 已知精度损失
+///
+/// 0.3.3 没有 offset API，seek 后重注入的弹幕**无法从半途续播**，
+/// 会从屏幕右边缘重新滚入。属于「近似而非精确」，UI 上不做承诺。
 library;
 
+// canvas_danmaku 也导出了一个 `DanmakuItem`（它自己的渲染期条目类型），
+// 与本项目 `danmaku_source.dart` 里的数据条目同名 —— 这里 hide 掉它，
+// 避免歧义导入。两者语义不同：我们的是「从弹幕源拉到的原始数据」，
+// 它的是「已进入渲染管线的在场条目」。
+import 'package:canvas_danmaku/canvas_danmaku.dart' hide DanmakuItem;
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
 
-import '../api/danmaku_api.dart';
-import '../api/player_backend.dart';
+import '../api/danmaku_source.dart';
+import '../api/diag_log.dart';
 
-class DanmakuLayer extends StatefulWidget {
-  final VideoHandle controller;
-  final List<DanmakuEntry> entries;
-
-  /// 是否显示（设置里可关）
-  final bool visible;
-
-  /// 不透明度 0..1
+/// 弹幕显示设置（播放页可实时调整）
+class DanmakuStyle {
+  final bool enabled;
   final double opacity;
+  final double fontSize;
 
-  const DanmakuLayer({
-    super.key,
-    required this.controller,
-    required this.entries,
-    this.visible = true,
-    this.opacity = 0.85,
+  const DanmakuStyle({
+    this.enabled = true,
+    this.opacity = 1.0,
+    this.fontSize = 16,
   });
 
-  @override
-  State<DanmakuLayer> createState() => _DanmakuLayerState();
+  DanmakuStyle copyWith({bool? enabled, double? opacity, double? fontSize}) =>
+      DanmakuStyle(
+        enabled: enabled ?? this.enabled,
+        opacity: opacity ?? this.opacity,
+        fontSize: fontSize ?? this.fontSize,
+      );
 }
 
-class _ActiveItem {
-  final DanmakuEntry e;
-  final double start; // 投放时的播放位置（秒）
-  final int lane;
-  double textWidth;
-  _ActiveItem(this.e, this.start, this.lane, {this.textWidth = 0});
+class DanmakuLayer extends StatefulWidget {
+  const DanmakuLayer({
+    super.key,
+    required this.entries,
+    required this.positionMs,
+    required this.style,
+    this.playing = true,
+  });
+
+  /// 全部弹幕（按 timeMs 升序）
+  final List<DanmakuItem> entries;
+
+  /// 当前播放位置（毫秒）—— 由播放页的 controller 监听器更新
+  final int positionMs;
+
+  final DanmakuStyle style;
+
+  /// 播放器是否在播放（暂停时同步暂停弹幕动画）
+  final bool playing;
+
+  @override
+  State<DanmakuLayer> createState() => DanmakuLayerState();
 }
 
-class _DanmakuLayerState extends State<DanmakuLayer>
-    with SingleTickerProviderStateMixin {
-  late final Ticker _ticker;
-  final List<_ActiveItem> _active = [];
-  int _nextIndex = 0; // entries 已按 time 排序
-  double _lastPos = 0;
+class DanmakuLayerState extends State<DanmakuLayer> {
+  DanmakuController<void>? _c;
 
-  static const _scrollDuration = 9.0; // 滚动弹幕横越屏幕的秒数
-  static const _fixedDuration = 5.0; // 顶部/底部停留秒数
-  static const _laneCount = 8;
-  static const _fontSize = 16.0;
-  static const _laneHeight = _fontSize + 10;
+  /// 下一条待发射弹幕的下标（正常播放时只前进，不重置）
+  int _cursor = 0;
 
-  @override
-  void initState() {
-    super.initState();
-    _ticker = createTicker(_onTick)..start();
-  }
+  /// 上一帧位置，用于检测「后退 = seek」
+  int _lastPos = 0;
+
+  /// 已发射条数（诊断用）
+  int _emitted = 0;
+
+  /// 供外部读取的诊断信息
+  String get debugInfo =>
+      '已发射 $_emitted / 共 ${widget.entries.length} 条，游标 $_cursor';
 
   @override
-  void dispose() {
-    _ticker.dispose();
-    super.dispose();
-  }
+  void didUpdateWidget(DanmakuLayer old) {
+    super.didUpdateWidget(old);
 
-  void _onTick(Duration _) {
-    if (!mounted || !widget.visible) return;
-    final c = widget.controller;
-    if (!c.initialized) return;
-    final pos = c.position.inMilliseconds / 1000.0;
+    // 换集 / 换源 → 弹幕列表整体换了，重置时间轴
+    if (!identical(old.entries, widget.entries)) {
+      _cursor = 0;
+      _lastPos = 0;
+      _emitted = 0;
+      _c?.clear();
+      kLog('[弹幕] 列表已更换（${widget.entries.length} 条），时间轴重置');
+      _pump();
+      return;
+    }
 
-    // 进度大幅回退：清场重投
-    if (pos < _lastPos - 1.5 || pos > _lastPos + 30) {
-      _active.clear();
-      _nextIndex = 0;
-      while (_nextIndex < widget.entries.length &&
-          widget.entries[_nextIndex].time < pos - 0.2) {
-        _nextIndex++;
+    // 样式变化 → 必须走 updateOption（重建 widget 无效，见文件头说明）
+    if (old.style.opacity != widget.style.opacity ||
+        old.style.fontSize != widget.style.fontSize ||
+        old.style.enabled != widget.style.enabled) {
+      _applyStyle();
+    }
+
+    // 暂停 / 继续：弹幕动画与播放器手动配对
+    if (old.playing != widget.playing) {
+      if (widget.playing) {
+        _c?.resume();
+      } else {
+        _c?.pause();
       }
+    }
+
+    _pump();
+  }
+
+  /// 把当前设置写到 controller
+  void _applyStyle() {
+    final c = _c;
+    if (c == null) return;
+    final on = widget.style.enabled;
+    c.updateOption(c.option.copyWith(
+      fontSize: widget.style.fontSize,
+      opacity: widget.style.opacity,
+      // 【注意】把 hideXxx 从 false 改 true 会**立即清空该类型已在场的弹幕**，
+      // 改回 false 不会恢复。所以关闭再打开会有一段空白，这是库的行为。
+      hideScroll: !on,
+      hideTop: !on,
+      hideBottom: !on,
+      hideSpecial: !on,
+    ));
+  }
+
+  /// 按当前播放位置发射到点的弹幕；检测到 seek 则重同步
+  void _pump() {
+    final c = _c;
+    if (c == null || !widget.style.enabled) return;
+
+    final pos = widget.positionMs;
+
+    // 位置大幅后退 → 用户拖了进度条 → 重同步
+    if (pos < _lastPos - 1500) {
+      _resync(pos);
+      _lastPos = pos;
+      return;
     }
     _lastPos = pos;
 
-    // 投放新弹幕
-    final es = widget.entries;
-    while (_nextIndex < es.length && es[_nextIndex].time <= pos) {
-      final e = es[_nextIndex];
-      if (e.time >= pos - 0.6) _launch(e, pos);
-      _nextIndex++;
+    // 正常播放：把到点的弹幕全部发出去
+    while (_cursor < widget.entries.length &&
+        widget.entries[_cursor].timeMs <= pos) {
+      _add(widget.entries[_cursor]);
+      _cursor++;
     }
-
-    // 回收离屏/超时的
-    _active.removeWhere((a) {
-      final elapsed = pos - a.start;
-      if (a.e.type == 1) {
-        // 完全滚出左缘
-        final w = _lastWidth;
-        final total = w + a.textWidth;
-        return elapsed * (total / _scrollDuration) > total + 40;
-      }
-      return elapsed > _fixedDuration;
-    });
-
-    setState(() {});
   }
 
-  double _lastWidth = 400;
+  void _add(DanmakuItem e) {
+    final c = _c;
+    if (c == null) return;
+    c.addDanmaku(DanmakuContentItem<void>(
+      e.text,
+      color: Color(0xFF000000 | e.color),
+      type: switch (e.mode) {
+        DanmakuMode.top => DanmakuItemType.top,
+        DanmakuMode.bottom => DanmakuItemType.bottom,
+        DanmakuMode.scroll => DanmakuItemType.scroll,
+      },
+    ));
+    _emitted++;
+  }
 
-  void _launch(DanmakuEntry e, double pos) {
-    // 选泳道：顶部/底部与滚动分开算
-    final lanesUsed = <int>{};
-    for (final a in _active) {
-      final sameKind = (a.e.type == 1) == (e.type == 1);
-      if (sameKind) lanesUsed.add(a.lane);
+  /// seek 重同步：清屏 + 重新注入「最近一个滚动周期」内的弹幕
+  void _resync(int posMs) {
+    final c = _c;
+    if (c == null) return;
+    c.clear();
+
+    // 游标推进到当前位置之后
+    _cursor = 0;
+    while (_cursor < widget.entries.length &&
+        widget.entries[_cursor].timeMs <= posMs) {
+      _cursor++;
     }
-    var lane = 0;
-    final maxLane = e.type == 1 ? _laneCount : 2;
-    while (lane < maxLane && lanesUsed.contains(lane)) {
-      lane++;
+
+    // 把最近 duration 秒内的弹幕重新注入，避免 seek 后画面空白。
+    // （会从右边重新滚入 —— 0.3.3 没有 offset，这是近似）
+    final windowMs = (c.option.duration * 1000).round();
+    final from = posMs - windowMs;
+    var n = 0;
+    for (final e in widget.entries) {
+      if (e.timeMs >= from && e.timeMs <= posMs) {
+        _add(e);
+        n++;
+      }
     }
-    if (lane >= maxLane) return; // 满了就丢（避免糊屏）
-    _active.add(_ActiveItem(e, pos, lane));
+    kLog('[弹幕] seek 到 ${(posMs / 1000).toStringAsFixed(1)}s，'
+        '重注入 $n 条，游标 → $_cursor');
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!widget.visible) return const SizedBox.shrink();
-    return LayoutBuilder(
-      builder: (context, c) {
-        _lastWidth = c.maxWidth;
-        return Opacity(
-          opacity: widget.opacity,
-          child: CustomPaint(
-            size: Size(c.maxWidth, c.maxHeight),
-            painter: _DanmakuPainter(
-              active: _active,
-              pos: _lastPos,
-              scrollDuration: _scrollDuration,
-              fixedDuration: _fixedDuration,
-              laneHeight: _laneHeight,
-              fontSize: _fontSize,
-            ),
-          ),
-        );
+    return DanmakuScreen<void>(
+      createdController: (c) {
+        // 【注意】这里**不能** setState —— 它在 initState 阶段被调用
+        _c = c;
+        _applyStyle();
+        // controller 就绪后补一次 pump，避免首帧前到点的弹幕被漏掉
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _pump();
+        });
       },
+      option: DanmakuOption(
+        fontSize: widget.style.fontSize,
+        opacity: widget.style.opacity,
+        fontWeight: 4,
+        // 滚动弹幕横穿屏幕的秒数
+        duration: 10,
+        // 顶部/底部静止弹幕停留秒数
+        staticDuration: 5,
+        strokeWidth: 1.5,
+        lineHeight: 1.6,
+        // 为底部控制栏预留空间，避免弹幕压住控件
+        safeArea: true,
+        hideScroll: !widget.style.enabled,
+        hideTop: !widget.style.enabled,
+        hideBottom: !widget.style.enabled,
+      ),
     );
   }
-}
-
-class _DanmakuPainter extends CustomPainter {
-  final List<_ActiveItem> active;
-  final double pos;
-  final double scrollDuration;
-  final double fixedDuration;
-  final double laneHeight;
-  final double fontSize;
-
-  _DanmakuPainter({
-    required this.active,
-    required this.pos,
-    required this.scrollDuration,
-    required this.fixedDuration,
-    required this.laneHeight,
-    required this.fontSize,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    for (final a in active) {
-      final tp = TextPainter(
-        text: TextSpan(
-          text: a.e.message,
-          style: TextStyle(
-            color: Color(0xFF000000 | a.e.color),
-            fontSize: fontSize,
-            fontWeight: FontWeight.w600,
-            shadows: const [
-              Shadow(color: Colors.black87, blurRadius: 2.5),
-              Shadow(color: Colors.black54, blurRadius: 5),
-            ],
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-        maxLines: 1,
-      )..layout(maxWidth: size.width);
-      a.textWidth = tp.width;
-
-      final elapsed = pos - a.start;
-      double x, y;
-      if (a.e.type == 1) {
-        // 滚动：右缘进场 → 左缘出场
-        final total = size.width + tp.width;
-        x = size.width - (elapsed / scrollDuration) * total;
-        y = 6 + a.lane * laneHeight;
-      } else if (a.e.type == 5) {
-        // 顶部
-        x = (size.width - tp.width) / 2;
-        y = 6 + a.lane * laneHeight;
-      } else {
-        // 底部
-        x = (size.width - tp.width) / 2;
-        y = size.height - 14 - (a.lane + 1) * laneHeight;
-      }
-      if (y + tp.height > size.height - 4 || y < 0) continue;
-      tp.paint(canvas, Offset(x, y));
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _DanmakuPainter oldDelegate) => true;
 }

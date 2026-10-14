@@ -96,6 +96,14 @@ final class _WindowPlacement extends ffi.Struct {
 
 // ═══════════════════════════ Win32 函数签名 ═══════════════════════════
 
+/// `EXECUTION_STATE SetThreadExecutionState(EXECUTION_STATE esFlags)`
+///
+/// 参数与返回值都是 `EXECUTION_STATE`（一个 DWORD 位掩码）。
+/// 注意用的是 `Uint32` 而不是 `Int32` —— `ES_CONTINUOUS` 是 `0x80000000`，
+/// 在 Int32 下是负数，虽然也能传，但用无符号更贴合 Win32 定义、避免混淆。
+typedef _SetThreadExecutionStateC = ffi.Uint32 Function(ffi.Uint32);
+typedef _SetThreadExecutionStateD = int Function(int);
+
 typedef _GetForegroundWindowC = ffi.Pointer Function();
 typedef _GetForegroundWindowD = ffi.Pointer Function();
 
@@ -162,6 +170,57 @@ typedef _DwmGetWindowAttributeD = int Function(ffi.Pointer, int, ffi.Pointer, in
 
 final bool _unsupported = !Platform.isWindows;
 
+/// 阻止系统息屏 / 休眠 / 屏保（播放期间调用）
+///
+/// ## 治什么
+///
+/// 用户反馈：「看久了会突然黑屏，但有声音、进度也在走，退出全屏就恢复」，
+/// 并猜测「系统判定没有应用正在运行所以自然息屏了」。
+///
+/// 这个猜测**很有道理**：Windows 的自动息屏只看「有没有输入事件」，
+/// 不看画面里有没有视频在放。全屏看番时用户长时间不动键鼠，
+/// 到点系统就关显示器（或启动屏保）——
+/// 表现就是「画面黑了但声音还在放」，而**动一下鼠标/退出全屏就恢复**。
+/// 这与用户描述的「退出全屏就恢复」完全吻合。
+///
+/// ## 怎么做
+///
+/// `SetThreadExecutionState` 是 Windows 官方提供的能力：
+///   - `ES_CONTINUOUS`        —— 设置持续生效（而不是只重置一次计时器）
+///   - `ES_DISPLAY_REQUIRED`  —— 要求显示器保持开启
+///   - `ES_SYSTEM_REQUIRED`   —— 要求系统保持唤醒
+///
+/// 播放开始时置位，暂停/退出时清除（只传 `ES_CONTINUOUS` 即恢复系统默认行为）。
+///
+/// ## 为什么两条路都要走
+///
+/// 系统息屏是「黑屏」的**一种**成因，视频输出链路掉帧是**另一种**。
+/// 这里治前者，`player_page.dart` 的看门狗治后者 —— 两者表现相同但根因不同，
+/// 所以都要覆盖（用户也要求「从多个角度修复」）。
+///
+/// 返回是否设置成功（不支持 / 失败时返回 false，调用方只记日志）。
+bool setKeepScreenOn(bool on) {
+  if (_unsupported) return false;
+  try {
+    const esContinuous = 0x80000000;
+    const esDisplayRequired = 0x00000002;
+    const esSystemRequired = 0x00000001;
+    final flags = on
+        ? (esContinuous | esDisplayRequired | esSystemRequired)
+        : esContinuous; // 只传 CONTINUOUS = 清除之前的持续要求
+    final prev = _Win32.setThreadExecutionState(flags);
+    if (prev == 0) {
+      kLog('[窗口] 防息屏${on ? "开启" : "关闭"}失败（API 返回 0）');
+      return false;
+    }
+    kLog('[窗口] 防息屏${on ? "已开启（播放期间显示器不休眠）" : "已关闭"}');
+    return true;
+  } catch (e) {
+    kLog('[窗口] 防息屏调用异常: $e');
+    return false;
+  }
+}
+
 class _Win32 {
   static final bool ok = !_unsupported;
 
@@ -172,6 +231,11 @@ class _Win32 {
   static final ffi.DynamicLibrary _kernel32 = _unsupported
       ? ffi.DynamicLibrary.process()
       : ffi.DynamicLibrary.open('kernel32.dll');
+
+  /// 防息屏 API（kernel32）
+  static final _SetThreadExecutionStateD setThreadExecutionState =
+      _kernel32.lookupFunction<_SetThreadExecutionStateC,
+          _SetThreadExecutionStateD>('SetThreadExecutionState');
 
   static final _GetForegroundWindowD getForegroundWindow =
       _user32.lookupFunction<_GetForegroundWindowC, _GetForegroundWindowD>(

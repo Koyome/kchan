@@ -149,6 +149,8 @@ class SettingsStore extends ChangeNotifier {
   static const _kDanmakuEnabled = 'danmaku_enabled';
   static const _kDanmakuAppId = 'danmaku_app_id';
   static const _kDanmakuAppSecret = 'danmaku_app_secret';
+  static const _kDanmakuOpacity = 'danmaku_opacity';
+  static const _kDanmakuFontSize = 'danmaku_font_size';
   // v1.4.0：网络出口（代理）设置
   static const _kProxyFollowSystem = 'proxy_follow_system';
   static const _kProxyManualEnabled = 'proxy_manual_enabled';
@@ -173,6 +175,10 @@ class SettingsStore extends ChangeNotifier {
   bool danmakuEnabled = true;
   String danmakuAppId = '';
   String danmakuAppSecret = '';
+  /// 弹幕不透明度 0.1~1.0
+  double danmakuOpacity = 1.0;
+  /// 弹幕字号
+  double danmakuFontSize = 16;
 
   /// 网络出口：是否跟随系统代理（Windows 读注册表）
   bool proxyFollowSystem = true;
@@ -226,6 +232,8 @@ class SettingsStore extends ChangeNotifier {
       danmakuEnabled = _sp.getBool(_kDanmakuEnabled) ?? true;
       danmakuAppId = _sp.getString(_kDanmakuAppId) ?? '';
       danmakuAppSecret = _sp.getString(_kDanmakuAppSecret) ?? '';
+    danmakuOpacity = (_sp.getDouble(_kDanmakuOpacity) ?? 1.0).clamp(0.1, 1.0);
+    danmakuFontSize = (_sp.getDouble(_kDanmakuFontSize) ?? 16).clamp(10.0, 40.0);
       proxyFollowSystem = _sp.getBool(_kProxyFollowSystem) ?? true;
       proxyManualEnabled = _sp.getBool(_kProxyManualEnabled) ?? false;
       proxyManualUrl = _sp.getString(_kProxyManualUrl) ?? '';
@@ -409,6 +417,20 @@ class SettingsStore extends ChangeNotifier {
       await _sp.setString(_kDanmakuAppSecret, danmakuAppSecret);
     });
     notifyListeners();
+  }
+
+  /// 设置弹幕不透明度（0.1~1.0）
+  Future<void> setDanmakuOpacity(double v) async {
+    danmakuOpacity = v.clamp(0.1, 1.0);
+    notifyListeners();
+    await _w(() => _sp.setDouble(_kDanmakuOpacity, danmakuOpacity));
+  }
+
+  /// 设置弹幕字号（10~40）
+  Future<void> setDanmakuFontSize(double v) async {
+    danmakuFontSize = v.clamp(10.0, 40.0);
+    notifyListeners();
+    await _w(() => _sp.setDouble(_kDanmakuFontSize, danmakuFontSize));
   }
 
   Future<void> addSearchHistory(String kw) async {

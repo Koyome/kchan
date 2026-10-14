@@ -31,6 +31,7 @@ import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'diag_log.dart';
+import 'child_process_manager.dart';
 import 'play_resolver.dart';
 
 class EdgeCdpResolver implements WebViewResolver {
@@ -506,7 +507,9 @@ class _EdgeBrowser {
     final exe = await _findBrowser();
     if (exe == null) return null;
     final tmp = await Directory.systemTemp
-        .createTemp('kchan_cdp_${DateTime.now().millisecondsSinceEpoch}_');
+        // 前缀 `kchan-edge-` 供 ChildProcessManager.sweepOrphans() 匹配；
+        // 启动时按该标记清扫上次运行遗留的孤儿浏览器进程。
+        .createTemp('kchan-edge-${DateTime.now().millisecondsSinceEpoch}_');
     Process? proc;
     WebSocketChannel? ws;
     // 端口：20000+随机，避开常用段
@@ -526,6 +529,10 @@ class _EdgeBrowser {
         ...extraArgs,
         'about:blank',
       ], mode: ProcessStartMode.inheritStdio);
+
+      // 登记托管：释放时用 taskkill /T 终止**整棵进程树**。
+      // 只 kill 父进程会留下 5~8 个孤儿（renderer/GPU/utility/crashpad）。
+      ChildProcessManager.instance.track(proc, tag: 'edge', userDataDir: tmp.path);
 
       // 轮询 DevTools HTTP 端点直到就绪（最长 10s）
       //
@@ -560,7 +567,7 @@ class _EdgeBrowser {
         http.close(force: true);
       }
       if (browserWs == null) {
-        proc.kill();
+        await ChildProcessManager.instance.release(proc.pid, tag: 'edge');
         return null;
       }
 
@@ -610,9 +617,13 @@ class _EdgeBrowser {
       try {
         await ws?.sink.close();
       } catch (_) {}
-      try {
-        proc?.kill();
-      } catch (_) {}
+      // 启动失败也要收掉整棵树（否则这半条命会一直挂着）
+      final failPid = proc?.pid;
+      if (failPid != null) {
+        try {
+          await ChildProcessManager.instance.release(failPid, tag: 'edge');
+        } catch (_) {}
+      }
       try {
         if (await tmp.exists()) await tmp.delete(recursive: true);
       } catch (_) {}
@@ -734,8 +745,9 @@ class _EdgeBrowser {
     try {
       await _ws.sink.close();
     } catch (_) {}
+    // 【v2.0.0】进程**树**终止：只 kill 父进程会留下 5~8 个孤儿浏览器进程
     try {
-      _proc.kill();
+      await ChildProcessManager.instance.release(_proc.pid, tag: 'edge');
     } catch (_) {}
     unawaited(Future<void>(() async {
       try {

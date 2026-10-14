@@ -137,12 +137,19 @@ Future<List<({int startMs, int endMs})>> scanInjectedAds(
     final text = utf8.decode(res.bodyBytes, allowMalformed: true);
 
     // ① 可能是多码率主列表：取其中的子列表再扫一次（只下钻一层）
+    // 主播放列表里只有 #EXT-X-STREAM-INF → 这是一个「主列表」，
+    // 真正的分片列表在它指向的子 m3u8 里，递归一层去扫。
+    //
+    // 【v2.0.0 修】这里原来写的是 `return scanInjectedAds(...)`（漏了 await）。
+    // 在 async 函数里直接 return 一个 Future 虽然语义上等价于 await，
+    // 但外层包在 try/catch 里时，异常不会被这个 catch 捕获，
+    // 且静态分析会报 unawaited_return_in_try_block —— 属于隐患，补上 await。
     if (!text.contains('#EXTINF') && text.contains('#EXT-X-STREAM-INF')) {
       final m = RegExp(r'^\s*([^\s#][^\s]*\.m3u8[^\s]*)', caseSensitive: false)
           .firstMatch(text);
       if (m != null) {
         final sub = Uri.parse(playlistUrl).resolve(m.group(1)!).toString();
-        return scanInjectedAds(sub, headers);
+        return await scanInjectedAds(sub, headers);
       }
       return const [];
     }

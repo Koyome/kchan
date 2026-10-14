@@ -1,7 +1,7 @@
 name: kchan
 description: "Kchan - Bangumi metadata + aggregated anime sources, local-first player"
 publish_to: 'none'
-version: 1.9.9+15
+version: 2.0.0+16
 
 environment:
   sdk: ^3.9.0
@@ -30,6 +30,10 @@ dependencies:
   webview_flutter: ^4.14.1
   # Windows 本地解析：无头 Edge + CDP（纯 Dart，见 lib/api/edge_cdp_resolver.dart）
   web_socket_channel: ^3.0.3
+  # 弹幕渲染引擎（CustomPainter 直绘，非每弹幕一 Widget）
+  # 【锁死版本】0.4.0 有破坏性变更（PR #20：接口改动、需显式指定 size），
+  # 所以不用 ^0.3.3，避免自动升级后编译失败。
+  canvas_danmaku: 0.3.3
   # 弹弹play 弹幕签名（SHA-256）
   crypto: ^3.0.0
   # 系统代理：dart:ffi 的内存分配辅助（calloc）

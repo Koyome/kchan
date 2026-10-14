@@ -1,22 +1,21 @@
-/// 弹弹play（dandanplay）开放平台弹幕 API
+/// 弹幕获取总入口（多源调度）
 ///
-/// ## 接入说明（对齐 Kazumi）
+/// ## 源的选择与优先级
 ///
-/// - 接口域：`https://api.dandanplay.net`
-/// - 鉴权：开放平台应用的 AppId / AppSecret，每个请求带签名头：
-///   `X-AppId`、`X-Timestamp`（秒）、`X-Signature`、
-///   另有 `X-Auth: 1`（Kazumi 同款）。
-///   签名算法（与 Kazumi `utils/crypto.dart` 完全一致）：
-///   `base64( sha256( appId + timestamp + path + appSecret ) )`
-/// - 凭证由用户在「设置 → 弹幕」里自行填写（弹弹play开放平台注册应用
-///   即可获得），本地存储、不内置任何人的凭证。
+/// | 源 | 凭证 | 状态 |
+/// | --- | --- | --- |
+/// | **哔哩哔哩** | 不需要 | 默认启用，实测可用 |
+/// | **弹弹play** | AppId + AppSecret | 用户填了就启用 |
 ///
-/// ## 弹幕匹配流程
+/// 用户要求「先接入其他免费开源的弹幕，给弹弹play 留位置方便审核之后添加」——
+/// 所以：B站作为**默认可用源**（无需任何配置），
+/// 弹弹play 凭证一旦填写就**自动参与调度且优先**（它的匹配质量更好），
+/// 审核通过后无需改任何代码。
 ///
-///  1. `GET /api/v2/search/episodes?anime=<番名>&episode=<集数>`
-///     直接按「番名+集数」命中 episodeId（v2 接口，绕开 25 条上限）
-///  2. `GET /api/v2/comment/<episodeId>?withRelated=true&chConvert=0`
-///     拉全部弹幕（含关联弹幕）
+/// ## 失败处理原则
+///
+/// 弹幕是**附加功能**，任何失败都只记日志 + 返回空列表，
+/// **绝不影响视频播放**。调用方拿到空列表就静默不显示弹幕层。
 library;
 
 import 'dart:convert';
@@ -24,23 +23,15 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
+import 'danmaku_source.dart';
 import 'diag_log.dart';
 
-/// 一条弹幕
+/// 兼容旧代码的条目类型（内部仍用于弹弹play 的解析）
 class DanmakuEntry {
-  /// 内容
   final String message;
-
-  /// 出现时间（秒）
   final double time;
-
-  /// 类型：1 滚动（从右往左）、4 底部、5 顶部
-  final int type;
-
-  /// 颜色（RGB，0xRRGGBB）
+  final int type; // 1 滚动 / 4 底部 / 5 顶部
   final int color;
-
-  /// 来源（如 [BiliBili]、[Gamer]）
   final String source;
 
   const DanmakuEntry({
@@ -61,28 +52,48 @@ class DanmakuEntry {
       source: p.length > 3 ? p[3] : '',
     );
   }
+
+  /// 转成统一条目
+  DanmakuItem toItem() => DanmakuItem(
+        timeMs: (time * 1000).round(),
+        text: message,
+        mode: switch (type) {
+          4 => DanmakuMode.bottom,
+          5 => DanmakuMode.top,
+          _ => DanmakuMode.scroll,
+        },
+        color: color & 0xFFFFFF,
+        source: source.isEmpty ? 'dandanplay' : source,
+      );
 }
 
-/// 弹幕 API 客户端
-class DanmakuApi {
+/// 弹弹play 客户端（第二源，需要开放平台凭证）
+class DandanplaySource implements DanmakuSource {
+  DandanplaySource({this.appId = '', this.appSecret = '', http.Client? client})
+      : _c = client ?? http.Client();
+
   static const _domain = 'https://api.dandanplay.net';
   static const _ua =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-      '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+      '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-  final http.Client _c = http.Client();
-
+  final http.Client _c;
   String appId;
   String appSecret;
 
-  DanmakuApi({this.appId = '', this.appSecret = ''});
+  @override
+  String get id => 'dandanplay';
 
-  bool get configured => appId.isNotEmpty && appSecret.isNotEmpty;
+  @override
+  String get displayName => '弹弹play';
+
+  @override
+  bool get available => appId.trim().isNotEmpty && appSecret.trim().isNotEmpty;
 
   Map<String, String> _headers(String path) {
     final ts = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final data = '$appId$ts$path$appSecret';
-    final sig = base64Encode(sha256.convert(utf8.encode(data)).bytes);
+    final sig = base64Encode(
+        sha256.convert(utf8.encode('$appId$ts$path$appSecret')).bytes);
     return {
       'User-Agent': _ua,
       'Accept': 'application/json',
@@ -113,68 +124,133 @@ class DanmakuApi {
     throw DanmakuException('弹幕接口数据异常');
   }
 
-  /// 按「番名 + 集数」直接匹配 episodeId。
-  ///
-  /// [animeTitle] 用 Bangumi 的中文名（没有就用原名）；
-  /// [episode] 为第几集（1 起）。
-  /// 返回 null 表示没匹配到。
   Future<int?> matchEpisodeId(String animeTitle, double episode) async {
-    if (!configured || animeTitle.trim().isEmpty) return null;
-    try {
-      final j = await _get('/api/v2/search/episodes', {
-        'anime': animeTitle.trim(),
-        'episode': episode.toStringAsFixed(0),
-      });
-      final animes = j['animes'];
-      if (animes is! List) return null;
-      for (final a in animes) {
-        if (a is! Map) continue;
-        final eps = a['episodes'];
-        if (eps is! List) continue;
-        for (final e in eps) {
-          if (e is! Map) continue;
-          final id = (e['episodeId'] as num?)?.toInt();
-          if (id != null && id > 0) return id;
-        }
+    if (!available || animeTitle.trim().isEmpty) return null;
+    final j = await _get('/api/v2/search/episodes', {
+      'anime': animeTitle.trim(),
+      'episode': episode.toStringAsFixed(0),
+    });
+    final animes = j['animes'];
+    if (animes is! List) return null;
+    for (final a in animes) {
+      if (a is! Map) continue;
+      final eps = a['episodes'];
+      if (eps is! List) continue;
+      for (final e in eps) {
+        if (e is! Map) continue;
+        final id = (e['episodeId'] as num?)?.toInt();
+        if (id != null && id > 0) return id;
       }
-      return null;
-    } catch (e) {
-      kLog('[Danmaku] 匹配剧集失败: $e');
-      return null;
     }
+    return null;
   }
 
-  /// 拉取一集的全部弹幕
   Future<List<DanmakuEntry>> comments(int episodeId) async {
-    if (!configured || episodeId <= 0) return const [];
+    if (!available || episodeId <= 0) return const [];
+    final j = await _get('/api/v2/comment/$episodeId', {
+      'withRelated': 'true',
+      'chConvert': '0',
+    });
+    final list = j['comments'];
+    if (list is! List) return const [];
+    final out = list
+        .whereType<Map>()
+        .map((e) => DanmakuEntry.fromJson(e.cast<String, dynamic>()))
+        .where((e) => e.message.isNotEmpty)
+        .toList()
+      ..sort((a, b) => a.time.compareTo(b.time));
+    return out;
+  }
+
+  @override
+  Future<List<DanmakuItem>> fetch({
+    required String animeTitle,
+    required double episode,
+  }) async {
+    if (!available) return const [];
     try {
-      final j = await _get('/api/v2/comment/$episodeId', {
-        'withRelated': 'true',
-        'chConvert': '0',
-      });
-      final list = j['comments'];
-      if (list is! List) return const [];
-      final out = list
-          .whereType<Map>()
-          .map((e) => DanmakuEntry.fromJson(e.cast<String, dynamic>()))
-          .where((e) => e.message.isNotEmpty)
-          .toList();
-      out.sort((a, b) => a.time.compareTo(b.time));
-      return out;
+      final id = await matchEpisodeId(animeTitle, episode);
+      if (id == null) {
+        kLog('[弹幕/弹弹play] 未匹配到「$animeTitle」第 ${episode.toStringAsFixed(0)} 集');
+        return const [];
+      }
+      final raw = await comments(id);
+      kLog('[弹幕/弹弹play] 命中 episodeId=$id，${raw.length} 条');
+      return raw.map((e) => e.toItem()).toList();
     } catch (e) {
-      kLog('[Danmaku] 拉取弹幕失败: $e');
+      kLog('[弹幕/弹弹play] 拉取失败: $e');
       return const [];
     }
   }
 
-  /// 一步完成「匹配 + 拉取」
-  Future<List<DanmakuEntry>> fetch(String animeTitle, double episode) async {
-    final id = await matchEpisodeId(animeTitle, episode);
-    if (id == null) return const [];
-    return comments(id);
+  void dispose() => _c.close();
+}
+
+/// 弹幕调度器：按优先级依次尝试各源
+class DanmakuApi {
+  DanmakuApi({this.appId = '', this.appSecret = ''}) {
+    _dandan = DandanplaySource(appId: appId, appSecret: appSecret);
+    _bili = BilibiliDanmakuSource();
   }
 
-  void dispose() => _c.close();
+  final String appId;
+  final String appSecret;
+
+  late final DandanplaySource _dandan;
+  late final BilibiliDanmakuSource _bili;
+
+  /// 是否已配置弹弹play（用于设置页提示）
+  bool get configured => _dandan.available;
+
+  /// 当前启用的源名字（日志/UI 用）
+  List<String> get enabledSourceNames => [
+        if (_dandan.available) _dandan.displayName,
+        if (_bili.available) _bili.displayName,
+      ];
+
+  /// 「匹配 + 拉取」一步完成。
+  ///
+  /// 按顺序尝试各源，**第一个返回非空结果的就用它**；
+  /// 全部失败返回空列表（调用方静默处理，不影响播放）。
+  Future<List<DanmakuItem>> fetchAll(
+    String animeTitle,
+    double episode, {
+    void Function(String message)? onNotice,
+  }) async {
+    final title = animeTitle.trim();
+    if (title.isEmpty) return const [];
+    // 弹弹play 优先（匹配质量更好），失败则退到 B站
+    final sources = <DanmakuSource>[
+      if (_dandan.available) _dandan,
+      if (_bili.available) _bili,
+    ];
+    if (sources.isEmpty) {
+      onNotice?.call('未配置可用的弹幕源');
+      return const [];
+    }
+    for (final s in sources) {
+      try {
+        final items = await s.fetch(animeTitle: title, episode: episode);
+        if (items.isNotEmpty) {
+          kLog('[弹幕] 使用「${s.displayName}」共 ${items.length} 条');
+          return items;
+        }
+      } catch (e) {
+        // 单个源失败不影响其它源
+        kLog('[弹幕] 「${s.displayName}」异常: $e');
+      }
+    }
+    // 全部源都没有结果 —— 友好提示，且**不影响播放**
+    final names = sources.map((s) => s.displayName).join('、');
+    kLog('[弹幕] 所有源（$names）均无结果');
+    onNotice?.call('未找到「$title」第 ${episode.toStringAsFixed(0)} 集的弹幕');
+    return const [];
+  }
+
+  void dispose() {
+    _dandan.dispose();
+    _bili.dispose();
+  }
 }
 
 class DanmakuException implements Exception {

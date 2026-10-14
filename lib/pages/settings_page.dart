@@ -288,18 +288,121 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
 
             // ---- 弹幕 ----
-            K.sectionLabel('弹幕（弹弹play）', cs.onSurface),
+            K.sectionLabel('弹幕', cs.onSurface),
             SwitchListTile(
               title: const Text('播放时加载弹幕', style: TextStyle(fontSize: 14)),
               subtitle: Text(
                 Store.settings.danmakuAppId.isEmpty
-                    ? '未配置凭证：到 doc.dandanplay.com/open 注册应用后填入下方两项'
-                    : '弹幕来源：弹弹play开放平台',
+                    // 默认走 B站：无需任何配置，实测可用
+                    ? '当前来源：哔哩哔哩（免配置）\n'
+                        '填入下方弹弹play凭证后会优先使用它'
+                    : '当前来源：弹弹play（已配置）+ 哔哩哔哩兜底',
                 style: const TextStyle(fontSize: 11.5),
               ),
               value: Store.settings.danmakuEnabled,
               activeThumbColor: K.accent,
               onChanged: (v) => Store.settings.setDanmakuEnabled(v),
+            ),
+            if (Store.settings.danmakuEnabled)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // 不透明度
+                    Row(
+                      children: [
+                        const SizedBox(
+                            width: 64,
+                            child: Text('不透明度',
+                                style: TextStyle(fontSize: 12.5))),
+                        Expanded(
+                          child: Slider(
+                            value: Store.settings.danmakuOpacity,
+                            min: 0.1,
+                            max: 1.0,
+                            divisions: 18,
+                            label:
+                                '${(Store.settings.danmakuOpacity * 100).round()}%',
+                            activeColor: K.accent,
+                            onChanged: (v) => Store.settings.setDanmakuOpacity(v),
+                          ),
+                        ),
+                        SizedBox(
+                          width: 44,
+                          child: Text(
+                            '${(Store.settings.danmakuOpacity * 100).round()}%',
+                            style: const TextStyle(fontSize: 12),
+                            textAlign: TextAlign.right,
+                          ),
+                        ),
+                      ],
+                    ),
+                    // 字号
+                    Row(
+                      children: [
+                        const SizedBox(
+                            width: 64,
+                            child: Text('弹幕字号',
+                                style: TextStyle(fontSize: 12.5))),
+                        Expanded(
+                          child: Slider(
+                            value: Store.settings.danmakuFontSize,
+                            min: 10,
+                            max: 40,
+                            divisions: 30,
+                            label:
+                                '${Store.settings.danmakuFontSize.round()}',
+                            activeColor: K.accent,
+                            onChanged: (v) =>
+                                Store.settings.setDanmakuFontSize(v),
+                          ),
+                        ),
+                        SizedBox(
+                          width: 44,
+                          child: Text(
+                            '${Store.settings.danmakuFontSize.round()}',
+                            style: const TextStyle(fontSize: 12),
+                            textAlign: TextAlign.right,
+                          ),
+                        ),
+                      ],
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4, bottom: 8),
+                      child: Text(
+                        '说明：B站弹幕只覆盖其番剧库已收录的作品；'
+                        '未收录的番会显示「未找到弹幕」，不影响播放。',
+                        style: TextStyle(
+                            fontSize: 11,
+                            color: cs.onSurface.withValues(alpha: 0.55)),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+            // ---- 弹弹play 凭证（可选，审核通过后填入即生效）----
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+              child: Text(
+                '弹弹play（可选 · 待审核）',
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: cs.onSurface.withValues(alpha: 0.75)),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+              child: Text(
+                '弹弹play 接口需要开放平台凭证（实测无凭证一律 403）。'
+                '到 doc.dandanplay.com/open 注册应用，把两项填在这里即可启用；'
+                '未填写时自动只用 B站。',
+                style: TextStyle(
+                    fontSize: 11,
+                    color: cs.onSurface.withValues(alpha: 0.55)),
+              ),
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),

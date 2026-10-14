@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:ui' show PlatformDispatcher;
+import 'dart:ui' show PlatformDispatcher, AppExitResponse;
 import 'dart:io' show Directory, File, FileMode, Platform;
 
 import 'package:flutter/material.dart';
@@ -13,6 +13,7 @@ import 'store/local_store.dart';
 import 'pages/detail_page.dart';
 import 'theme.dart';
 import 'api/diag_log.dart';
+import 'api/child_process_manager.dart';
 import 'api/js_gate.dart';
 import 'api/kazumi_rules.dart';
 import 'api/player_backend.dart' show initPlayerBackend;
@@ -143,6 +144,25 @@ Future<void> main() async {
   FlutterError.onError = (details) {
     _syncDiag('FlutterError: ${details.exception}');
   };
+  // 【退出清理】onExitRequested 是 Flutter 提供的「可拦截退出」钩子，
+  // 返回后框架才真正退出 —— 正好用来回收子进程树。
+  // 注意：若进程被强杀（任务管理器结束任务），这里不会执行；
+  // 那种情况由下次启动的 sweepOrphans() 兜底。
+  try {
+    AppLifecycleListener(
+      onExitRequested: () async {
+        kLog('[退出] 开始回收子进程');
+        try {
+          await ChildProcessManager.instance.reapAll();
+        } catch (_) {}
+        flushDiagLog();
+        return AppExitResponse.exit;
+      },
+    );
+  } catch (e) {
+    debugPrint('AppLifecycleListener 注册失败: $e');
+  }
+
   runApp(KChanApp(e2eSubject: e2eSubject, e2ePage: e2ePage));
   _syncDiag('after runApp');
 
@@ -234,6 +254,16 @@ Future<void> _warmUpAfterFirstFrame() async {
   } catch (e, st) {
     debugPrint('fvp.registerWith failed: $e\n$st');
   }
+
+  // ⑤ 清扫**上次运行遗留**的浏览器进程。
+  //
+  // 【为什么需要】CDP 解析会拉起 msedge；正常路径下退出时会收掉整棵树，
+  // 但若上次是崩溃/强杀退出，孤儿进程就会一直挂着（用户反馈「关掉应用
+  // 后视频浏览器进程依旧存在」）。这里按 `--user-data-dir` 的
+  // `kchan-edge-` 标记精确匹配我们拉起的进程，不误伤用户自己的浏览器。
+  //
+  // 放最后：纯清理动作，不该抢规则加载的 CPU/IO。
+  unawaited(ChildProcessManager.instance.sweepOrphans());
 
   kLog('[启动] 后台预热完成');
   flushDiagLog();

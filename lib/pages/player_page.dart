@@ -21,6 +21,7 @@ import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart' as wv;
 
 import '../api/danmaku_api.dart';
+import '../api/danmaku_source.dart';
 import '../api/diag_log.dart' show kLog;
 import '../api/kazumi_rules.dart';
 import '../api/player_backend.dart';
@@ -239,8 +240,27 @@ class _PlayerPageState extends State<PlayerPage> {
   ];
 
   // ── 弹幕（弹弹play）──
-  final DanmakuApi _danmakuApi = DanmakuApi();
-  List<DanmakuEntry> _danmakus = [];
+  /// 弹幕调度器（多源）。凭证在构造时从 Store 读取 —— 见 _makeDanmakuApi。
+  late DanmakuApi _danmakuApi;
+  /// 弹幕条目（统一类型，来自 B站 或 弹弹play）
+  List<DanmakuItem> _danmakus = const [];
+
+  /// 弹幕时间轴锚点：由 controller 监听器推进，驱动 DanmakuLayer 投放弹幕
+  int _danmakuPosMs = 0;
+
+  /// 当前是否已置「禁止息屏」（避免重复调用 Win32 API）
+  bool _keepScreenOn = false;
+
+  /// 弹幕显示设置（开关 / 透明度 / 字号）
+  DanmakuStyle _danmakuStyle = const DanmakuStyle();
+
+  /// 弹幕层 key：换集/换源时用它强制重建，彻底重置时间轴与在场弹幕
+  Key _danmakuKey = UniqueKey();
+
+  DanmakuApi _makeDanmakuApi() => DanmakuApi(
+        appId: Store.settings.danmakuAppId,
+        appSecret: Store.settings.danmakuAppSecret,
+      );
   bool _danmakuVisible = true;
 
   bool get _isAndroid => !kIsWeb && Platform.isAndroid;
@@ -256,6 +276,16 @@ class _PlayerPageState extends State<PlayerPage> {
         0, widget.lines.isEmpty ? 0 : widget.lines.length - 1);
     WidgetsBinding.instance.addObserver(_lifecycle);
     _lifecycle.onPause = _saveProgress;
+    // 【v2.0.0】弹幕调度器与显示设置必须在 boot 之前就绪：
+    // `_loadDanmaku()` 在起播成功后立即调用，那时如果 `_danmakuApi` 还是
+    // `late` 未初始化的状态，会抛 LateInitializationError。
+    // （实测踩过：弹幕整体加载失败，但播放不受影响 —— 因为调用处有兜底。）
+    _danmakuApi = _makeDanmakuApi();
+    _danmakuStyle = DanmakuStyle(
+      enabled: Store.settings.danmakuEnabled,
+      opacity: Store.settings.danmakuOpacity,
+      fontSize: Store.settings.danmakuFontSize,
+    );
     // 【快捷键】全局提前接管键盘事件（见 `_keyFocus` 处的说明）
     FocusManager.instance.addEarlyKeyEventHandler(_onGlobalKey);
     _boot();
@@ -888,7 +918,8 @@ class _PlayerPageState extends State<PlayerPage> {
       _manualUrl = null;
       _autoRetried = false; // 换源/换集后允许新的一轮自动重试
       _sameSourceRetried = false;
-      _danmakus = []; // 换源/换集后重新拉弹幕
+      _danmakus = const []; // 换源/换集后重新拉弹幕
+      _danmakuPosMs = 0;
     });
   }
 
@@ -989,6 +1020,10 @@ class _PlayerPageState extends State<PlayerPage> {
     _maybeSkipAd(); // 起点为 0 的前贴：不等位置更新，立刻跳过
 
     kLog('[播放] 控制器已就绪（初始化完成）');
+    // 【v2.0.0 · 黑屏修复之一】播放期间禁止系统息屏/休眠。
+    // 全屏看番时长时间无键鼠输入，Windows 到点会关显示器，
+    // 表现就是「画面黑了但声音还在」—— 与用户反馈完全一致。
+    windowCtl.setKeepScreenOn(true);
     _startOutputWatchdog();
     _e2eAutoFullscreen();
 
@@ -997,6 +1032,25 @@ class _PlayerPageState extends State<PlayerPage> {
       // 【v1.9.9】位置更新时检查是否落进注入广告/前贴区间 → 自动跳过。
       // 放在最前面且在任何 setState 之前：跳过是即时的，不该等一帧。
       _maybeSkipAd();
+      // 【v2.0.0】播放/暂停切换时同步防息屏状态：
+      // 暂停时恢复系统默认（省电），继续播放时重新阻止息屏。
+      final playing = controller.isPlaying;
+      if (playing != _keepScreenOn) {
+        _keepScreenOn = playing;
+        windowCtl.setKeepScreenOn(playing);
+      }
+
+      // 【v2.0.0】推进弹幕时间轴。
+      // canvas_danmaku 没有时间轴概念，必须由我们从播放器位置驱动；
+      // 用 setState 是为了把新 position 传进 DanmakuLayer.didUpdateWidget。
+      // 弹幕层很轻（CustomPainter 直绘），每帧一次 setState 可接受；
+      // 无弹幕时不触发，避免无谓重建。
+      if (_danmakus.isNotEmpty) {
+        final ms = controller.position.inMilliseconds;
+        if (ms != _danmakuPosMs) {
+          setState(() => _danmakuPosMs = ms);
+        }
+      }
       if (controller.hasError && !controller.isCompleted) {
         final msg = controller.errorText ?? '未知错误';
         if (!_errorReported) {
@@ -1051,24 +1105,39 @@ class _PlayerPageState extends State<PlayerPage> {
     return true;
   }
 
-  /// 拉取弹幕（弹弹play）：番名 + 集数匹配，失败静默降级为无弹幕
+  /// 拉取弹幕（多源：B站 / 弹弹play）。
+  ///
+  /// 【原则】弹幕是附加功能：任何失败都只记日志 + 给个轻提示，
+  /// **绝不影响视频播放**（不抛异常、不阻塞起播、不改播放状态）。
   Future<void> _loadDanmaku() async {
     if (!Store.settings.danmakuEnabled) return;
-    _danmakuApi.appId = Store.settings.danmakuAppId;
-    _danmakuApi.appSecret = Store.settings.danmakuAppSecret;
-    if (!_danmakuApi.configured) return;
     final title = widget.subject.displayName.isNotEmpty
         ? widget.subject.displayName
         : widget.subject.name;
     try {
-      final list = await _danmakuApi.fetch(title, _epSort);
+      _danmakuApi.dispose();
+    _danmakus = const [];
+      _danmakuApi = _makeDanmakuApi();
+      final list = await _danmakuApi.fetchAll(
+        title,
+        _epSort,
+        onNotice: (msg) {
+          // 友好提示：不打断播放，只在底部轻轻提示一下
+          if (mounted) _showHint(msg);
+        },
+      );
       if (!mounted) return;
-      // 【v1.6.0 低性能机】弹幕是逐帧重绘的重负载，低端机限制条数（默认 ≤120 条）
-      final dpr = MediaQuery.of(context).devicePixelRatio;
-      setState(() => _danmakus = dpr >= 2.5 && list.length > 120 ? list.take(120).toList() : list);
-      debugPrint('[弹幕] 已加载 ${list.length} 条（$title 第${_epSort.toStringAsFixed(0)}集）');
+      // 换集/换源要重置弹幕层时间轴：换 key 强制重建 State
+      setState(() {
+        _danmakus = list;
+        _danmakuPosMs = 0;
+        _danmakuKey = UniqueKey();
+      });
+      kLog('[弹幕] 已加载 ${list.length} 条（$title 第${_epSort.toStringAsFixed(0)}集）'
+          '，源=${_danmakuApi.enabledSourceNames.join("/")}');
     } catch (e) {
-      debugPrint('[弹幕] 加载失败: $e');
+      // 兜底：无论如何都不能影响播放
+      kLog('[弹幕] 加载失败（已忽略，不影响播放）: $e');
     }
   }
 
@@ -1503,6 +1572,11 @@ class _PlayerPageState extends State<PlayerPage> {
     _saveProgress();
     _outWatchdog?.cancel();
     _outWatchdog = null;
+    // 离开播放页必须恢复系统息屏策略，否则会一直阻止息屏
+    if (_keepScreenOn) {
+      _keepScreenOn = false;
+      windowCtl.setKeepScreenOn(false);
+    }
     FocusManager.instance.removeEarlyKeyEventHandler(_onGlobalKey);
     // 必须主动退出全屏：否则用户返回列表页后，窗口仍是无边框全屏状态
     if (_windowFullscreen) {
@@ -1721,12 +1795,17 @@ class _PlayerPageState extends State<PlayerPage> {
                 fit: StackFit.expand,
                 children: [
                   c.videoWidget(fit: BoxFit.contain),
-                  if (_danmakus.isNotEmpty)
-                    IgnorePointer(
+                  // 弹幕层：时间轴由 _danmakuPosMs 驱动（canvas_danmaku
+                  // 自身没有时间概念，见 danmaku_layer.dart 文件头说明）。
+                  // 它内部已包 IgnorePointer，不会吞掉播放器手势。
+                  if (_danmakus.isNotEmpty && Store.settings.danmakuEnabled)
+                    Positioned.fill(
                       child: DanmakuLayer(
-                        controller: c,
+                        key: _danmakuKey,
                         entries: _danmakus,
-                        visible: _danmakuVisible && Store.settings.danmakuEnabled,
+                        positionMs: _danmakuPosMs,
+                        style: _danmakuStyle,
+                        playing: c.isPlaying,
                       ),
                     ),
                   // 缓冲指示（v1.5.0：播放中卡顿转圈可见）
