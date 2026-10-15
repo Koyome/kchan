@@ -343,19 +343,19 @@ html.no-js .reveal{opacity:1;transform:none}
   *{transition-duration:.01ms !important}
 }
 
-/* ── 视觉带：三张真实图片，等比例同裁切 ───────────────────────────── */
-.plates{display:grid;grid-template-columns:1fr 1fr;gap:clamp(18px,2.4vw,32px);
+/* ── 角色图：四张等宽，竖构图裁成同一比例 ─────────────────────────── */
+.plates{display:grid;grid-template-columns:repeat(4,1fr);gap:clamp(10px,1.6vw,22px);
   margin:var(--gap-sec) auto 0;max-width:1240px;padding:0 var(--pad)}
-.plates figure{margin:0;display:grid;gap:12px;align-content:start}
-.plates img{width:100%;height:clamp(200px,30vw,380px);object-fit:cover;background:var(--surface)}
-.plates figcaption{font-size:var(--step-body);color:var(--ink);line-height:1.45;max-width:42ch}
-.plates figcaption i{font-style:normal;font-size:var(--step-small);color:var(--muted);display:block;margin-top:3px}
+.plates figure{margin:0}
+.plates img{width:100%;height:clamp(220px,26vw,340px);object-fit:cover;object-position:center 22%;
+  background:var(--surface)}
 @media (max-width:900px){
-  .plates{grid-template-columns:1fr 1fr}
-  .plates img{height:clamp(160px,32vw,240px)}
+  .plates{grid-template-columns:repeat(2,1fr)}
+  .plates img{height:clamp(200px,42vw,300px)}
 }
 @media (max-width:560px){
-  .plates{grid-template-columns:1fr}
+  .plates{grid-template-columns:repeat(2,1fr);gap:10px}
+  .plates img{height:clamp(150px,44vw,220px)}
 }
 
 /* 窄屏：七个星期挤在一行 */
