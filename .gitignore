@@ -73,3 +73,16 @@ kchan_startup.log
 .swiftpm/
 migrate_working_dir/
 .widget_preview/
+
+# ── 凭证类文件（绝不入库）──
+# 弹弹play 的 AppSecret 通过 `--dart-define` 在编译期注入，
+# 明文只存在于 D:\dev\build_win_creds.ps1（仓库之外）。
+# 这里再加一道防线，防止误把含密钥的文件拖进仓库。
+build_win_creds*
+*creds*.ps1
+*secret*
+*.key
+# 含弹弹play AppSecret 明文，绝不入库
+tool/verify_dandan_live.dart
+tool/*_creds*.dart
+

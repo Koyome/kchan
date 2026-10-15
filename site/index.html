@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="no-js">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K酱 — Windows 上的追番播放器</title>
+<meta name="description" content="K酱是 Windows 上的追番播放器。聚合 86 条线路，按真实网络体检挑出能用的；这条断了自动换下一条。免安装，解压即用。">
+<link rel="icon" href="app_icon.ico">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<a class="skip" href="#download">跳到下载</a>
+
+<header class="topbar">
+  <a class="mark" href="#">K酱</a>
+  <nav>
+    <a href="#lines">线路</a>
+    <a href="#reach">连接</a>
+    <a href="#rest">功能</a>
+    <a href="#faq">常见问题</a>
+  </nav>
+  <a class="btn btn-sm" href="#download">下载 Windows 版</a>
+</header>
+
+<main>
+
+  <!-- ══════════════ 首屏 ══════════════ -->
+  <section class="hero">
+    <div class="hero-copy">
+      <h1 class="reveal">打开就知道<br>今天看什么</h1>
+      <p class="lede reveal">Windows 上的追番播放器。聚合 86 条线路，按真实网络体检挑出能用的，断了自动换下一条。</p>
+
+      <div class="hero-actions reveal">
+        <a class="btn btn-lg" id="dl-win" href="#download">
+          下载 Windows 版
+          <span class="btn-meta">v2.1.10 · 53 MB</span>
+        </a>
+        <p class="note">免安装 · 解压即用 · 安卓版在做</p>
+      </div>
+    </div>
+
+    <!-- 首屏主片段：每日放送表（可翻星期，真实数据） -->
+    <div class="schedule reveal">
+      <div class="sched-head">
+        <span class="sched-title">每日放送 · <span id="season-label">2026 年 10 月</span></span>
+        <span class="sched-count"><span id="day-count">—</span> 部在播</span>
+      </div>
+
+      <div class="sched-days" role="tablist" aria-label="选择星期" data-ui>
+        <button role="tab" data-w="1" aria-selected="false">周一</button>
+        <button role="tab" data-w="2" aria-selected="false">周二</button>
+        <button role="tab" data-w="3" aria-selected="false">周三</button>
+        <button role="tab" data-w="4" aria-selected="false">周四</button>
+        <button role="tab" data-w="5" aria-selected="false">周五</button>
+        <button role="tab" data-w="6" aria-selected="false">周六</button>
+        <button role="tab" data-w="7" aria-selected="false">周日</button>
+      </div>
+
+      <ul class="sched-list" id="sched-list" aria-live="polite">
+        <li class="sched-empty">正在载入本季放送表…</li>
+      </ul>
+
+      <p class="sched-foot">
+        本季 100 部，数据来自 Bangumi 番组计划，经自建反代实测拉取。
+      </p>
+    </div>
+  </section>
+
+  <!-- ══════════════ 段 1 · 线路体检 ══════════════ -->
+  <section class="band" id="lines">
+    <div class="row">
+      <div class="col-text reveal">
+        <h2>还活着的线路，通常不到十条</h2>
+        <p>聚合来的线路里，站长跑路、域名过期、被墙是常态。K酱 每次解析前先做一遍网络体检，把真的能连上的排进候选，不能用的直接跳过。你不会坐在那里等一个早就没了的站点转圈。</p>
+      </div>
+
+      <div class="col-frag reveal">
+        <div class="frag frag-probe" data-ui>
+          <div class="frag-bar"><span>线路体检</span><span id="probe-sum">—</span></div>
+          <ul class="probe-list">
+            <li><span class="dot ok"></span><span class="pname">AGE动漫</span><span class="pms">412ms</span><span class="pst ok">可用</span></li>
+            <li><span class="dot ok"></span><span class="pname">AnFuns</span><span class="pms">668ms</span><span class="pst ok">可用</span></li>
+            <li><span class="dot ok"></span><span class="pname">girigiri</span><span class="pms">1.2s</span><span class="pst ok">可用</span></li>
+            <li><span class="dot bad"></span><span class="pname">mgnacg</span><span class="pms">超时</span><span class="pst bad">跳过</span></li>
+            <li><span class="dot bad"></span><span class="pname">LMM</span><span class="pms">DNS 失败</span><span class="pst bad">跳过</span></li>
+            <li><span class="dot ok"></span><span class="pname">libvio</span><span class="pms">905ms</span><span class="pst ok">可用</span></li>
+            <li><span class="dot bad"></span><span class="pname">7sefun</span><span class="pms">连接被拒</span><span class="pst bad">跳过</span></li>
+            <li><span class="dot ok"></span><span class="pname">anime7</span><span class="pms">1.5s</span><span class="pst ok">可用</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════ 段 2 · 自动切换（钉住） ══════════════ -->
+  <section class="band dark" id="switch">
+    <div class="row">
+      <div class="col-frag reveal">
+        <div class="frag frag-switch" data-ui>
+          <div class="frag-bar"><span>解析线路</span><span id="switch-sum">—</span></div>
+          <ol class="switch-list">
+            <li data-step="0"><span class="sname">线路 1 · libvio</span><span class="sres">连接超时</span></li>
+            <li data-step="1"><span class="sname">线路 2 · AGE动漫</span><span class="sres">返回 403</span></li>
+            <li data-step="2"><span class="sname">线路 3 · AnFuns</span><span class="sres ok">出图 1080P</span></li>
+          </ol>
+          <div class="switch-shot" id="switch-shot">
+            <span>换到可用线路后开始播放</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-text reveal">
+        <h2>这条不通，它自己换下一条</h2>
+        <p>当前线路解析失败，或者播放中途出错，K酱 会按体检结果换下一条，换成功才上屏。三条试完都没结果，才会告诉你失败。</p>
+        <ul class="mini">
+          <li><b>先跑最快的三条</b><span>不等全部体检完，先让能用的上屏</span></li>
+          <li><b>失败线路进冷却</b><span>120 秒内不再重试，不空等</span></li>
+          <li><b>失败原因写清楚</b><span>哪条试过、什么错，都写进日志</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════ 段 3 · 连接与数字 ══════════════ -->
+  <section class="band" id="reach">
+    <h2 class="wide reveal">番剧数据被墙？走自己搭的反代</h2>
+    <p class="wide body reveal">Bangumi 的官方接口在国内不稳定。K酱 支持填自建反代地址，也能把域名固定到实测最快的节点上，首页数据从 4 秒降到 0.7 秒。</p>
+
+    <div class="tiles reveal">
+      <div class="tile"><b>0.7s</b><span>首页数据（自建反代，实测中位）</span></div>
+      <div class="tile"><b>100 部</b><span>本季放送表，一次拉全</span></div>
+      <div class="tile"><b>86</b><span>内置解析规则</span></div>
+      <div class="tile"><b>25/25</b><span>反代连续请求成功次数</span></div>
+    </div>
+  </section>
+
+  <!-- ══════════════ 视觉带 · 追番这件事的样子 ══════════════ -->
+  <section class="plates" aria-label="追番这件事的样子">
+    <figure class="reveal">
+      <img src="assets/windows.jpg" alt="高楼窗前眺望城市的人影，黑白"
+           width="1600" height="1000" loading="lazy" decoding="async">
+      <figcaption>晚上十点，窗还亮着。<i>Charles Forerunner / Unsplash</i></figcaption>
+    </figure>
+    <figure class="reveal">
+      <img src="assets/facade.jpg" alt="白色公寓立面，重复的阳台与窗"
+           width="1600" height="1000" loading="lazy" decoding="async">
+      <figcaption>一栋楼里，几十块屏幕在放同一部新番。<i>Roman Kraft / Unsplash</i></figcaption>
+    </figure>
+    <figure class="reveal">
+      <img src="assets/station.jpg" alt="车站大厅的拱窗与走动的人群"
+           width="1600" height="1000" loading="lazy" decoding="async">
+      <figcaption>通勤路上先想好今晚看哪一集。<i>Nicolai Berntsen / Unsplash</i></figcaption>
+    </figure>
+  </section>
+
+  <!-- ══════════════ 段 4 · 其余功能 ══════════════ -->
+  <section class="band" id="rest">
+    <h2 class="wide reveal">播放器该有的，这里都有</h2>
+
+    <div class="board">
+      <div class="slot reveal">
+        <div class="frag" data-ui>
+          <div class="frag-bar"><span>弹幕</span><span>弹弹play</span></div>
+          <div class="dm-stage">
+            <span class="dm" style="--y:12%;--d:0s">这集作画真的顶</span>
+            <span class="dm" style="--y:30%;--d:.6s">音乐一响我就知道要来了</span>
+            <span class="dm" style="--y:52%;--d:1.2s">第二遍了还是好看</span>
+            <span class="dm" style="--y:74%;--d:1.8s">这里小说里没有的</span>
+          </div>
+          <ul class="kv">
+            <li><span>开关</span><b>开</b></li>
+            <li><span>透明度</span><b>80%</b></li>
+            <li><span>字号</span><b>中</b></li>
+          </ul>
+        </div>
+        <p><b>弹幕</b> 接的是弹弹play，带 SHA-256 签名。开关、透明度、字号都能调。</p>
+      </div>
+
+      <div class="slot reveal">
+        <div class="frag" data-ui>
+          <div class="frag-bar"><span>播放控制</span><span>第 3 集</span></div>
+          <ul class="kv">
+            <li><span>倍速</span><b>1.5×</b></li>
+            <li><span>线路</span><b>3 / 7</b></li>
+            <li><span>画面比例</span><b>适应</b></li>
+            <li><span>音量</span><b>80%</b></li>
+          </ul>
+          <div class="scales"><i>0.5×</i><i>1×</i><i class="on">1.5×</i><i>2×</i><i>3×</i></div>
+        </div>
+        <p><b>倍速与线路</b> 0.5× 到 3×，选集、选线路、切画面比例。</p>
+      </div>
+
+      <div class="slot reveal">
+        <div class="frag" data-ui>
+          <div class="frag-bar"><span>窗口</span><span>全屏前 / 后</span></div>
+          <div class="win">
+            <div class="win-i"><span>1280 × 720</span><i>窗口</i></div>
+            <div class="win-i on"><span>1920 × 1080</span><i>无边框全屏</i></div>
+          </div>
+          <p class="frag-note">铺满屏幕并盖住任务栏，退出后精确还原原来的窗口位置和大小。</p>
+        </div>
+        <p><b>真·无边框全屏</b> 不是把窗口放到最大，是真的铺满，退出还原。</p>
+      </div>
+
+      <div class="slot reveal">
+        <div class="frag" data-ui>
+          <div class="frag-bar"><span>看门狗</span><span>运行中</span></div>
+          <ul class="kv">
+            <li><span>视频帧</span><b>正常</b></li>
+            <li><span>音频</span><b>正常</b></li>
+            <li><span>掉帧检测</span><b>已开启</b></li>
+          </ul>
+          <p class="frag-note">检测到「有声音没画面」会在后台重建输出，不用你手动切线路。</p>
+        </div>
+        <p><b>看门狗</b> 有声音没画面时自动恢复，不用你动手。</p>
+      </div>
+
+      <div class="slot reveal">
+        <div class="frag" data-ui>
+          <div class="frag-bar"><span>快捷键</span><span>可在设置里改</span></div>
+          <ul class="keys">
+            <li><kbd>空格</kbd><span>暂停 / 继续</span></li>
+            <li><kbd>←</kbd><kbd>→</kbd><span>快退 / 快进 5 秒</span></li>
+            <li><kbd>F</kbd><span>全屏</span></li>
+            <li><kbd>Esc</kbd><span>退出全屏</span></li>
+          </ul>
+        </div>
+        <p><b>快捷键</b> 空格暂停、方向键快进退、F 全屏、Esc 退出。</p>
+      </div>
+
+      <div class="slot reveal">
+        <div class="frag" data-ui>
+          <div class="frag-bar"><span>本机数据</span><span>不上传</span></div>
+          <p class="path">%APPDATA%\me.koyome\kchan\</p>
+          <ul class="kv">
+            <li><span>追番</span><b>仅本机</b></li>
+            <li><span>观看历史</span><b>仅本机</b></li>
+            <li><span>账号系统</span><b>没有</b></li>
+          </ul>
+        </div>
+        <p><b>记录只在本机</b> 追番、历史、设置都在一个文件里，没有账号，不传服务器。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════ 段 5 · 常见问题 ══════════════ -->
+  <section class="band faq" id="faq">
+    <h2 class="wide reveal">常见问题</h2>
+    <div class="faq-list reveal">
+      <details><summary>需要安装吗？</summary><p>不用。下载 zip 解压，双击 K酱.exe 就能跑。想卸载直接删文件夹，不留注册表项。</p></details>
+      <details><summary>番剧数据是哪来的？</summary><p>元数据来自 Bangumi 番组计划。播放地址由 86 条解析规则从公开的第三方站点取，规则对齐 KazumiRules。</p></details>
+      <details><summary>为什么有的番搜不到？</summary><p>K酱 自己不存资源，只做解析。某个番如果所有线路都没有，就播放不了。这种情况它会明确告诉你，不会假装在加载。</p></details>
+      <details><summary>安卓版呢？</summary><p>在做。这个版本只发 Windows，安卓要等播放内核和横竖屏都调完。</p></details>
+      <details><summary>记录会上传吗？</summary><p>不会。追番、历史、设置全在本机一个文件里，没有账号系统。</p></details>
+      <details><summary>要花钱吗？</summary><p>不要。程序本身免费，也不含广告。</p></details>
+    </div>
+  </section>
+
+  <!-- ══════════════ 下载 ══════════════ -->
+  <section class="cta" id="download">
+    <h2 class="reveal">下载 Windows 版</h2>
+    <p class="reveal">v2.1.10 · 53 MB · 解压即用</p>
+    <div class="cta-actions reveal">
+      <a class="btn btn-lg" id="dl-big" href="https://github.com/Koyome/kchan/releases/latest/download/Kchan-Windows-v2.1.10.zip">
+        下载 K酱
+      </a>
+      <div class="alt">
+        <b>安卓版</b>
+        <span>敬请期待</span>
+      </div>
+    </div>
+    <p class="note reveal">下载走自建反代，国内直连即可。也可以到 <a href="https://github.com/Koyome/kchan/releases/download/v2.1.10/Kchan-Windows-v2.1.10.zip">GitHub 原始地址</a> 或 <a href="https://github.com/Koyome/kchan/releases">全部版本</a>。</p>
+  </section>
+
+</main>
+
+<footer>
+  <p class="foot-mark">K酱</p>
+  <div class="foot-grid">
+    <div><b>下载</b><a href="#download">Windows v2.1.10</a><span>Android 敬请期待</span></div>
+    <div><b>源码</b><a href="https://github.com/Koyome/kchan">github.com/Koyome/kchan</a></div>
+    <div><b>致谢</b><span>Bangumi 番组计划</span><span>KazumiRules</span><span>media_kit / libmpv</span></div>
+    <div><b>说明</b><span>本站不含任何影视资源，只做聚合与播放。</span></div>
+  </div>
+</footer>
+
+<script src="data.js"></script>
+<script src="site.js"></script>
+</body>
+</html>
