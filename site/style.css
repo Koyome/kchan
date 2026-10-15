@@ -109,7 +109,13 @@ p + p{margin-top:.7em}
   gap:clamp(24px,4vw,64px);align-items:start;
 }
 .hero-copy{padding-top:clamp(4px,3vw,40px)}
-.hero .lede{margin-top:clamp(18px,2.2vw,28px);max-width:30ch}
+.hero .lede{margin-top:clamp(18px,2.2vw,28px);max-width:40ch;
+  font-size:var(--step-body);line-height:1.5}
+/* 首屏要点：四行，每行一句粗体结论 + 一句说明 */
+.points{list-style:none;margin:clamp(22px,2.8vw,34px) 0 0;padding:0;display:grid;gap:clamp(12px,1.5vw,18px);max-width:46ch}
+.points li{display:grid;gap:3px}
+.points b{font-weight:500;font-size:var(--step-body);letter-spacing:-.015em}
+.points span{font-size:var(--step-small);color:var(--muted);line-height:1.5}
 .hero-actions{margin-top:clamp(22px,3vw,36px)}
 @media (max-width:1000px){
   .hero{grid-template-columns:1fr;gap:30px}
@@ -261,6 +267,10 @@ kbd{font-family:inherit;font-size:var(--step-small);background:var(--bg);color:v
   margin-top:clamp(32px,4.4vw,60px);align-items:stretch}
 /* 同一行的两个片段等高，正文推到底 —— 否则左右底边错开，看起来没对齐 */
 .slot{display:flex;flex-direction:column}
+/* 第一块跨两列 —— 六块一样重会读得平，给弹幕（最常被问的）多一点分量 */
+.slot-wide{grid-column:1 / -1}
+.slot-wide .frag-note{max-width:70ch}
+@media (max-width:900px){.slot-wide{grid-column:auto}}
 .slot > .frag{flex:1 1 auto}
 .slot > p{margin-top:auto;padding-top:18px}
 .slot p{margin-top:18px;font-size:var(--step-body);color:var(--ink);max-width:44ch}
@@ -343,19 +353,27 @@ html.no-js .reveal{opacity:1;transform:none}
   *{transition-duration:.01ms !important}
 }
 
-/* ── 角色图：四张等宽，竖构图裁成同一比例 ─────────────────────────── */
-.plates{display:grid;grid-template-columns:repeat(4,1fr);gap:clamp(10px,1.6vw,22px);
-  margin:var(--gap-sec) auto 0;max-width:1240px;padding:0 var(--pad)}
-.plates figure{margin:0}
-.plates img{width:100%;height:clamp(220px,26vw,340px);object-fit:cover;object-position:center 22%;
-  background:var(--surface)}
+/* ── 角色图：一大三小 ─────────────────────────────────────────────
+   左边一张占两行高（主图），右边三张叠排。有主次，不是四宫格。 */
+.plates{
+  display:grid;grid-template-columns:1.15fr 1fr 1fr;
+  grid-template-rows:repeat(2,1fr);
+  gap:clamp(10px,1.5vw,20px);
+  margin:var(--gap-sec) auto 0;max-width:1240px;padding:0 var(--pad);
+  height:clamp(420px,46vw,620px);
+}
+.plates figure{margin:0;overflow:hidden;background:var(--surface)}
+.plates .plate-lead{grid-row:1 / span 2}
+.plates img{width:100%;height:100%;object-fit:cover;object-position:center 20%;display:block}
 @media (max-width:900px){
-  .plates{grid-template-columns:repeat(2,1fr)}
-  .plates img{height:clamp(200px,42vw,300px)}
+  .plates{grid-template-columns:1fr 1fr;grid-template-rows:repeat(2,1fr);
+    height:clamp(360px,72vw,520px)}
+  .plates .plate-lead{grid-row:1 / span 1}
+  .plates img{object-position:center 18%}
 }
 @media (max-width:560px){
-  .plates{grid-template-columns:repeat(2,1fr);gap:10px}
-  .plates img{height:clamp(150px,44vw,220px)}
+  .plates{grid-template-columns:1fr 1fr;grid-template-rows:repeat(2,1fr);
+    height:clamp(300px,86vw,420px);gap:10px}
 }
 
 /* 窄屏：七个星期挤在一行 */
