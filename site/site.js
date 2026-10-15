@@ -150,7 +150,7 @@
   //
   // 走自建反代：GitHub Release 资产实际在 objects.githubusercontent.com，
   // 但入口 github.com 在国内间歇性被墙（实测 TCP 超时）。Worker 代取可绕开。
-  var FALLBACK = 'https://bgm.kchan.top/dl/Koyome/kchan/v2.1.10/Kchan-Windows-v2.1.10.zip';
+  var FALLBACK = '/dl/Koyome/kchan/v2.1.10/Kchan-Windows-v2.1.10.zip';
 
   // GitHub 原始地址：反代不可用时的第二选择（用户也能自己在页面看到）
   var GH = 'https://github.com/Koyome/kchan/releases/download/v2.1.10/Kchan-Windows-v2.1.10.zip';

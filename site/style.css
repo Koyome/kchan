@@ -337,16 +337,15 @@ html.no-js .reveal{opacity:1;transform:none}
 }
 
 /* ── 视觉带：三张真实图片，等比例同裁切 ───────────────────────────── */
-.plates{display:grid;grid-template-columns:1.25fr 1fr 1fr;gap:var(--pad);
+.plates{display:grid;grid-template-columns:1fr 1fr;gap:clamp(18px,2.4vw,32px);
   margin:var(--gap-sec) auto 0;max-width:1240px;padding:0 var(--pad)}
 .plates figure{margin:0;display:grid;gap:12px;align-content:start}
-.plates img{width:100%;height:clamp(200px,26vw,320px);object-fit:cover;background:var(--surface)}
+.plates img{width:100%;height:clamp(200px,30vw,380px);object-fit:cover;background:var(--surface)}
 .plates figcaption{font-size:var(--step-small);color:var(--ink);line-height:1.5}
 .plates figcaption i{font-style:normal;color:var(--muted);display:block}
 @media (max-width:900px){
   .plates{grid-template-columns:1fr 1fr}
-  .plates figure:first-child{grid-column:1 / -1}
-  .plates img{height:clamp(180px,38vw,260px)}
+  .plates img{height:clamp(160px,32vw,240px)}
 }
 @media (max-width:560px){
   .plates{grid-template-columns:1fr}
