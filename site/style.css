@@ -257,13 +257,19 @@ kbd{font-family:inherit;font-size:var(--step-small);background:var(--bg);color:v
 .tile span{font-size:var(--step-small);color:var(--muted);line-height:1.45}
 
 /* ── 功能板 ─────────────────────────────────────────────────────────── */
-.board{display:grid;grid-template-columns:1fr 1fr;gap:clamp(26px,4vw,56px);
-  margin-top:clamp(32px,4.4vw,60px)}
+.board{display:grid;grid-template-columns:1fr 1fr;gap:clamp(30px,4.2vw,64px) clamp(26px,4vw,56px);
+  margin-top:clamp(32px,4.4vw,60px);align-items:stretch}
+/* 同一行的两个片段等高，正文推到底 —— 否则左右底边错开，看起来没对齐 */
+.slot{display:flex;flex-direction:column}
+.slot > .frag{flex:1 1 auto}
+.slot > p{margin-top:auto;padding-top:18px}
 .slot p{margin-top:18px;font-size:var(--step-body);color:var(--ink);max-width:44ch}
 .slot p b{font-weight:500;color:var(--ink)}
 
 /* ── FAQ：问题索引，一次一个答案 ────────────────────────────────────── */
 .faq-list{margin-top:clamp(26px,3.4vw,44px);max-width:60ch}
+/* 与 CTA 拉开：两段间距必须明显大于段内间距，否则上一段的尾句会被读成下一段的眉标 */
+.faq{padding-bottom:clamp(40px,5.5vw,96px)}
 .faq-list details{margin:0}
 .faq-list summary{padding:16px 0;font-size:var(--step-body);font-weight:500;cursor:pointer;list-style:none;
   display:flex;justify-content:space-between;align-items:center;gap:16px;
@@ -273,12 +279,13 @@ kbd{font-family:inherit;font-size:var(--step-small);background:var(--bg);color:v
   transition:transform .2s var(--ease)}
 .faq-list details[open] summary::after{transform:rotate(45deg)}
 .faq-list summary:hover{color:var(--muted)}
-.faq-list p{padding:0 0 20px;color:var(--ink);max-width:56ch;
+.faq-list p{padding:0 0 18px;color:var(--ink);max-width:56ch;
   animation:rowIn .26s var(--ease) both}
 
 /* ── CTA ────────────────────────────────────────────────────────────── */
-.cta{margin-top:var(--gap-sec);padding:var(--gap-sec) var(--pad);background:var(--f1);
-  color:var(--f1-ink);text-align:left}
+.cta{margin-top:clamp(56px,6.5vw,110px);
+  padding:clamp(64px,7.5vw,120px) var(--pad) clamp(72px,8vw,140px);
+  background:var(--f1);color:var(--f1-ink);text-align:left}
 .cta>h2,.cta>p,.cta>.cta-actions,.cta>.note{max-width:1240px;margin-left:auto;margin-right:auto}
 .cta>p{margin-top:16px;color:var(--f1-ink);opacity:.7}
 .cta-actions{display:flex;align-items:center;gap:clamp(24px,4vw,56px);margin-top:clamp(28px,3.6vw,44px);
@@ -341,8 +348,8 @@ html.no-js .reveal{opacity:1;transform:none}
   margin:var(--gap-sec) auto 0;max-width:1240px;padding:0 var(--pad)}
 .plates figure{margin:0;display:grid;gap:12px;align-content:start}
 .plates img{width:100%;height:clamp(200px,30vw,380px);object-fit:cover;background:var(--surface)}
-.plates figcaption{font-size:var(--step-small);color:var(--ink);line-height:1.5}
-.plates figcaption i{font-style:normal;color:var(--muted);display:block}
+.plates figcaption{font-size:var(--step-body);color:var(--ink);line-height:1.45;max-width:42ch}
+.plates figcaption i{font-style:normal;font-size:var(--step-small);color:var(--muted);display:block;margin-top:3px}
 @media (max-width:900px){
   .plates{grid-template-columns:1fr 1fr}
   .plates img{height:clamp(160px,32vw,240px)}
