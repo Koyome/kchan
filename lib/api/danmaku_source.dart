@@ -362,34 +362,77 @@ class BilibiliDanmakuSource implements DanmakuSource {
       String title, double episode) async {
     final ep = episode.round();
     if (ep < 1 || ep > 999) return null;
+    // 【v2.1.10】关键词保留「番名 + 第N集」。
+    //
+    // 试过改成只用番名（想拿到更权威的结果集），实测**更糟**：
+    //     「进击的巨人」40 个结果 → 26 个「标题无集号」（剪辑/杂谈/AMV）
+    //     「海贼王」    40 个结果 → 34 个「标题无集号」
+    // 因为热门番的搜索页被二创内容占满，带集号的正片反而被挤出去。
+    // 加上「第N集」能把结果集收窄到「像是单集投稿」的范围。
+    //
+    // 但**保留翻两页**：第 1 页被搬运占满时，正片常在第 2 页。
     final kw = '$title 第$ep集';
     final q = Uri.encodeQueryComponent(kw);
-    final j = await _getJson(
-        'https://api.bilibili.com/x/web-interface/search/type'
-        '?search_type=video&keyword=$q');
-    final res = ((j['data'] ?? const {})['result'] ?? const []) as List;
+    final res = <dynamic>[];
+    for (final page in [1, 2]) {
+      try {
+        final j = await _getJson(
+            'https://api.bilibili.com/x/web-interface/search/type'
+            '?search_type=video&keyword=$q&page=$page');
+        final one = ((j['data'] ?? const {})['result'] ?? const []) as List;
+        if (one.isEmpty) break;
+        res.addAll(one);
+      } catch (e) {
+        // 第 2 页失败不影响第 1 页的结果
+        kLog('[弹幕/B站] 搜索第 $page 页失败（忽略）: $e');
+        break;
+      }
+    }
     if (res.isEmpty) return null;
 
     final scored = <(int, String, String)>[]; // (score, bvid, title)
+    // 【v2.1.10 · 诊断】记录每个候选被哪道门槛淘汰。
+    // 实测「进击的巨人」「海贼王」「电锯人」搜到结果却全部落选，
+    // 而日志只说「未匹配到」—— 看不出是排除词、集号还是时长的问题。
+    final kills = <String, int>{};
+    void kill(String why) => kills[why] = (kills[why] ?? 0) + 1;
+    var totalRes = 0;
+
     for (final r in res) {
       if (r is! Map) continue;
+      totalRes++;
       final t = _stripTags('${r['title'] ?? ''}');
       final bvid = '${r['bvid'] ?? ''}';
-      if (bvid.isEmpty) continue;
+      if (bvid.isEmpty) {
+        kill('无 bvid');
+        continue;
+      }
 
       // 门槛 1：排除词（合集/解说/reaction/…）
-      if (_kVidExclude.hasMatch(t)) continue;
+      if (_kVidExclude.hasMatch(t)) {
+        kill('命中排除词');
+        continue;
+      }
       // 门槛 2：必须命中集号模式，且集号对得上。
       // 支持阿拉伯数字与中文数字（实测「第1话」「第一话」都常见）。
       final m = _kVidEpisode.firstMatch(t);
-      if (m == null) continue;
+      if (m == null) {
+        kill('标题无集号');
+        continue;
+      }
       final arabic = m.group(1) ?? m.group(2) ?? m.group(3);
       final cn = m.group(4);
       final gotEp = arabic != null ? int.tryParse(arabic) : _cnNum(cn ?? '');
-      if (gotEp != ep) continue;
+      if (gotEp != ep) {
+        kill('集号不符(${gotEp ?? "?"}≠$ep)');
+        continue;
+      }
       // 门槛 3：时长区间（单集合理范围）
       final sec = _parseDuration('${r['duration'] ?? ''}');
-      if (sec < 120 || sec > 2700) continue;
+      if (sec < 120 || sec > 2700) {
+        kill('时长越界(${sec}s)');
+        continue;
+      }
 
       var score = 10;
       if (sec >= 1200 && sec <= 1800) score += 4; // 20~30 分钟最典型
@@ -398,28 +441,80 @@ class BilibiliDanmakuSource implements DanmakuSource {
       if (t.contains(short)) score += 2;
       scored.add((score, bvid, t));
     }
-    if (scored.isEmpty) return null;
+    // 【v2.1.10 · 诊断】落选原因汇总。搜到结果却全被淘汰时，
+    // 这一行能立刻指出是哪道门槛太严 —— 否则只有一句「未匹配到」，无从下手。
+    if (scored.isEmpty) {
+      final detail = kills.entries.map((e) => '${e.key}×${e.value}').join('，');
+      kLog('[弹幕/B站] 「$title」第 $ep 集：搜到 $totalRes 个结果，'
+          '全部落选（$detail）');
+      return null;
+    }
+    kLog('[弹幕/B站] 「$title」第 $ep 集：$totalRes 个结果 → '
+        '${scored.length} 个候选通过筛选');
     scored.sort((a, b) => b.$1.compareTo(a.$1));
 
-    // 逐个候选试，直到找到**弹幕数量够**的那个（控制请求数）
-    for (final (score, bvid, t) in scored.take(_kMaxUserVideoTries)) {
-      final cid = await _cidOfVideo(bvid);
-      if (cid == null) continue;
-      final items = await _fetchSegments(cid);
-      if (items.length < _kMinUserVideoDanmaku) {
-        kLog('[弹幕/B站] 投稿「$t」只有 ${items.length} 条弹幕，'
-            '低于质量门槛 $_kMinUserVideoDanmaku，换下一个候选');
-        continue;
+    // 【v2.1.10 · 修「有些番取不到弹幕」】
+    //
+    // 实测 8 部番里有 2 部失败：
+    //     「进击的巨人」→ 匹配到「进击的巨人（搬运）第1话（有码）」0 条 → 放弃
+    //     「电锯人」    → 匹配到某投稿 9 条                           → 放弃
+    //
+    // 问题是：**候选排在前面的恰好是搬运/低质投稿，而后面有正常投稿没被试到**
+    // （旧 `_kMaxUserVideoTries` 太小，试完几个就 return null）。
+    //
+    // 现在改成**门槛逐级放宽 + 候选上限提高**：
+    //   第 1 轮：要 ≥30 条（正常投稿）
+    //   第 2 轮：要 ≥5 条（稀疏但时间轴对，好过完全没有）
+    //   第 3 轮：只要 >0 条（有就用 —— 用户宁可看 3 条弹幕也不想看到「未找到」）
+    //
+    // 只在「上一轮全失败」时才降级，所以正常情况下不会多打网络。
+    final thresholds = <int>[
+      _kMinUserVideoDanmaku, // 30
+      5,
+      1,
+    ];
+    final tried = <String>{};
+    for (var round = 0; round < thresholds.length; round++) {
+      final need = thresholds[round];
+      for (final (score, bvid, t) in scored.take(_kMaxUserVideoTries)) {
+        if (tried.contains(bvid)) continue;
+        tried.add(bvid);
+        final cid = await _cidOfVideo(bvid);
+        if (cid == null) continue;
+        final items = await _fetchSegments(cid);
+        if (items.length < need) {
+          kLog('[弹幕/B站] 投稿「$t」只有 ${items.length} 条弹幕，'
+              '低于本轮门槛 $need（第 ${round + 1} 轮），换下一个候选');
+          continue;
+        }
+        if (round > 0) {
+          kLog('[弹幕/B站] 降级采用：门槛放宽到 $need 后命中「$t」'
+              '（${items.length} 条）');
+        } else {
+          kLog('[弹幕/B站] 番剧库未收录，改用投稿（score=$score，$bvid）'
+              '「$t」→ ${items.length} 条');
+        }
+        return items;
       }
-      kLog('[弹幕/B站] 番剧库未收录，改用投稿（score=$score，$bvid）'
-          '「$t」→ ${items.length} 条');
-      return items;
+      if (round < thresholds.length - 1) {
+        kLog('[弹幕/B站] 门槛 $need 下无可用投稿，'
+            '放宽到 ${thresholds[round + 1]} 再试一轮');
+      }
     }
     return null;
   }
 
   /// 最多试几个投稿候选（每个要 1 次 view + N 次分片请求，不宜多）
-  static const int _kMaxUserVideoTries = 3;
+  /// 【v2.1.10】从 3 提到 10。
+  ///
+  /// 实测「进击的巨人」「电锯人」这类**热门但有搬运投稿干扰**的番，
+  /// 排序靠前的 3 个候选全是低质（0 条 / 9 条），而正常投稿排在后面 ——
+  /// 上限 3 时根本轮不到就被判「未找到」。
+  ///
+  /// 提到 10 后配合下方的门槛逐级放宽，能把它们救回来。
+  /// 代价可控：只在「前面都不合格」时才会多打网络，
+  /// 而且第一轮命中（绝大多数情况）时行为完全不变。
+  static const int _kMaxUserVideoTries = 10;
 
   /// 投稿兜底的**最低弹幕数**。
   ///

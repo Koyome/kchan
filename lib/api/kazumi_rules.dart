@@ -635,7 +635,19 @@ class RuleEpisode {
   final String title;
   final String url;
   final int sort;
-  const RuleEpisode({required this.title, required this.url, this.sort = 0});
+
+  /// sort 是不是「猜的」：标题里解析不出集号时回退成列表序号（= true）。
+  ///
+  /// 【v2.1.2】合并去重要用：同一集号下若既有猜的又有解析出来的，
+  /// 保留解析出来的那个（实测：FQDM 同一条线路里「预告」会抢占第 1 集）。
+  final bool guessedSort;
+
+  const RuleEpisode({
+    required this.title,
+    required this.url,
+    this.sort = 0,
+    this.guessedSort = false,
+  });
 }
 
 /// 详情页解析结果
@@ -643,17 +655,27 @@ class RuleBangumiDetail {
   final List<RuleRoad> roads;
   const RuleBangumiDetail({required this.roads});
 
-  /// 合并所有线路（去重时按集数）
+  /// 合并所有线路，**按集号去重**（v2.1.2）
+  ///
+  /// 旧实现按 `sort|标题` 去重，同一个集号在不同线路标题写法不同时
+  /// （「第2集」vs「第02集」）会被算成两集 → 卡片数虚高、格子里却只有
+  /// 一个能点（实测 FQDM：显示收录 3 集、实际只有 2 个集号可点）。
+  /// 现在同一集号只保留一条，优先保留标题里**真解析出集号**的条目
+  /// （避免「预告」这类回退序号挤掉正片）。
   List<RuleEpisode> get allEpisodes {
-    final seen = <String>{};
-    final out = <RuleEpisode>[];
+    final bySort = <int, RuleEpisode>{};
     for (final r in roads) {
       for (final e in r.episodes) {
-        final key = '${e.sort}|${e.title}';
-        if (seen.add(key)) out.add(e);
+        final old = bySort[e.sort];
+        if (old == null) {
+          bySort[e.sort] = e;
+        } else if (old.guessedSort && !e.guessedSort) {
+          bySort[e.sort] = e; // 解析出来的胜过猜的
+        }
       }
     }
-    out.sort((a, b) => a.sort.compareTo(b.sort));
+    final out = bySort.values.toList()
+      ..sort((a, b) => a.sort.compareTo(b.sort));
     return out;
   }
 }
@@ -720,10 +742,12 @@ class KazumiParser {
         // 真实地址由 JS 点击时拼接。跳过，避免把 javascript: 当可播地址。
         if (href.toLowerCase().startsWith('javascript:')) continue;
         final t = nodeText(en);
+        final parsedSort = _episodeFromTitle(t);
         eps.add(RuleEpisode(
           title: _cleanEpisodeName(t, n),
           url: absolutize(href, rule.baseURL),
-          sort: _episodeFromTitle(t) ?? n,
+          sort: parsedSort ?? n,
+          guessedSort: parsedSort == null,
         ));
       }
       if (eps.isNotEmpty) {
@@ -798,10 +822,12 @@ class KazumiParser {
         final pageUrl = _resolveJsonEpisodeUrl(cfg, rootVars,
             rawUrl: rawUrl, roadIndex: ri, episodeIndex: ei);
         if (pageUrl.isEmpty) continue;
+        final parsedSort = _episodeFromTitle(epName);
         eps.add(RuleEpisode(
           title: epName.isEmpty ? '第${ei + 1}集' : epName,
           url: pageUrl,
-          sort: _episodeFromTitle(epName) ?? (ei + 1),
+          sort: parsedSort ?? (ei + 1),
+          guessedSort: parsedSort == null,
         ));
       }
       if (eps.isEmpty) continue;
@@ -838,10 +864,12 @@ class KazumiParser {
         final pageUrl = _resolveJsonEpisodeUrl(cfg, rootVars,
             rawUrl: rawUrl, roadIndex: ri, episodeIndex: ei);
         if (pageUrl.isEmpty) continue;
+        final parsedSort = _episodeFromTitle(name);
         eps.add(RuleEpisode(
           title: name.isEmpty ? '第${ei + 1}集' : name,
           url: pageUrl,
-          sort: _episodeFromTitle(name) ?? (ei + 1),
+          sort: parsedSort ?? (ei + 1),
+          guessedSort: parsedSort == null,
         ));
       }
       if (eps.isEmpty) continue;
@@ -1166,9 +1194,17 @@ class RuleRegistry {
     '7sefun',
     'FQDM',
     'MXdm',
-    'gugu3',
+    // 【v2.1.1】gugu3 移出默认启用：2026-10-14 新番实测 8 部 0 命中、
+    // 每个请求都 >8s，站点半死——留着只会让每轮扫描/聚合白等它超时。
+    // 规则保留，用户仍可在设置里手动打开。
     'moonci',
     'DM84',
+    // 【v2.1.2】86 条全量体检 + 双关键词复测后新增：
+    // sorani 24/28 集全通（~2.4s）、gpjda 24/28 集全通（~2.1s），
+    // 两条都稳定多线路；替换掉的是体检中超时/半死的 dmghg、fcdm、
+    // Fantuan（均复测一半超时）等。数据见 tool/probe_sources.dart。
+    'sorani',
+    'gpjda',
   ];
 
   /// 首屏「优先聚合」的源数量上限。

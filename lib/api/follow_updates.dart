@@ -19,11 +19,17 @@
 ///   3. 比基线大 → 标记「有更新」，追番页显示红点 + 「更新至第 N 集」；
 ///   4. 点进去看 → 走 `DetailPage` 的实时聚合，拿到的就是最新集。
 ///
-/// ## 性能：竞速而非全量聚合
+/// ## 性能：全源并发 + 取最大集数（v2.1.1 修正）
 ///
-/// 详情页为了「多源择优」会并发跑完所有源；但检测只需要知道**最新集数**，
-/// 所以这里让各源**竞速**，谁先给出非空剧集列表就用谁，其余结果丢弃。
-/// 一部番通常 1~2 个请求搞定，而不是 6 个。
+/// v2.1.0 曾用「竞速」——谁先给出非空剧集列表就用谁。实测这是**错的**：
+/// 快源（7sefun 等）1~2 秒返回**旧集数**就赢了竞速，慢源（DM84 单请求
+/// 6~7s）虽然已有最新一集，结果却被直接丢弃 —— 表现为「明明 DM84 更新
+/// 了新一集，软件却同步不上」。
+///
+/// 现改为对齐 Kazumi/囧次元的聚合语义：**所有源并发探测，取各源最大
+/// 集数**，并记下是哪家有最新集。为了不把扫描拖成「等最慢的源」，
+/// 设总时限 [_probeDeadline]，超时就用已到手的最好结果（慢源的后台
+/// 请求自带 12s 超时，不会泄漏）。
 ///
 /// ## 容错
 ///
@@ -128,10 +134,22 @@ class FollowUpdateService {
   static final FollowUpdateService instance = FollowUpdateService();
 
   /// 同一部番两次扫描的最小间隔，避免频繁打扰源站
-  static const Duration scanInterval = Duration(hours: 3);
+  ///
+  /// 【v2.1.1】3h → 30min：用户目标「新出一集后尽快同步」。
+  /// 30 分钟是客户端轮询的合理下限（再密会对源站造成压力，且新番
+  /// 是周更，30 分钟粒度足够「过一会儿就能看到」）。
+  /// 注意：打开详情页 / 切回前台走的是**实时聚合**（10 分钟 TTL），
+  /// 不受此间隔限制——真正的「立刻看到」靠那条路径。
+  static const Duration scanInterval = Duration(minutes: 30);
 
-  /// 单部番所有源竞速的总超时
-  static const Duration probeTimeout = Duration(seconds: 20);
+  /// 单个 HTTP 请求的超时（与 video_sources._kRequestTimeout 对齐）
+  static const Duration probeTimeout = Duration(seconds: 12);
+
+  /// 一部番全源探测的总时限：到点就用已到手的最好结果。
+  ///
+  /// 慢源（DM84 高峰期单请求 6~7s、还可能要换备用名重试）需要 20s 上下；
+  /// 再久基本就是站点半死，不值得为它拖住整轮扫描。
+  static const Duration probeDeadline = Duration(seconds: 28);
 
   /// 同时扫描的番剧数（worker pool 大小）
   static const int concurrency = 3;
@@ -152,6 +170,31 @@ class FollowUpdateService {
 
   DateTime? _lastScanAt;
   DateTime? get lastScanAt => _lastScanAt;
+
+  /// 周期自动扫描的定时器（软件常开场景）
+  Timer? _autoTimer;
+
+  /// 启动周期自动扫描：每 [scanInterval] 扫一轮（scan 内部还有逐番节流，
+  /// 到点未 ScanInterval 的番会自动跳过，不会重复打扰源站）。
+  ///
+  /// 【v2.1.1】此前只有「启动时 + 进追番页」两个触发点，软件一直开着
+  /// 就永远不会再扫——新出一集要等用户下次重启才发现。
+  void startAutoScan() {
+    _autoTimer?.cancel();
+    // 周期比节流间隔略长 2 分钟：扫描本身要花几秒，若周期与节流等长，
+    // 下一轮 tick 的 elapsed 会差几秒不足 scanInterval 而被整体跳过
+    // （表现为「隔一轮才扫一次」）。
+    _autoTimer = Timer.periodic(scanInterval + const Duration(minutes: 2), (_) {
+      if (_scanning) return;
+      unawaited(scan());
+    });
+  }
+
+  /// 停止周期自动扫描（设置里关掉「启动时自动检测」时调用）
+  void stopAutoScan() {
+    _autoTimer?.cancel();
+    _autoTimer = null;
+  }
 
   /// 注入存储依赖（由 main.dart 调用）
   void configure({
@@ -354,7 +397,7 @@ class FollowUpdateService {
     final keywords = _keywordCandidates(s);
 
     try {
-      final found = await _raceFirstPositive(sources, keywords);
+      final found = await _probeAllSources(sources, keywords);
       final now = DateTime.now().millisecondsSinceEpoch;
 
       if (found == null) {
@@ -420,42 +463,63 @@ class FollowUpdateService {
     }
   }
 
-  /// 竞速：哪个源先给出「最新集数 > 0」就用哪个
-  Future<({double sort, String source})?> _raceFirstPositive(
+  /// 全源并发探测：取**各源最大集数**，返回 (最大集数, 该集数所在源)。
+  ///
+  /// 【v2.1.1】取代 v2.1.0 的「竞速取第一个」——快源先回来但集数可能滞后，
+  /// 必须等所有源（或总时限到）再取最大，才不会漏掉「只有慢源更新了新一集」
+  /// 的情况（实测：新番更新时一度只有 DM84 有最新一集）。
+  ///
+  /// 到 [probeDeadline] 仍有源没回来，就用已到手的最好结果；没回来的源
+  /// 请求自带超时，会在后台自然收尾，不会泄漏。
+  Future<({double sort, String source})?> _probeAllSources(
     List<VideoSource> sources,
     List<String> keywords,
   ) async {
-    final completer = Completer<({double sort, String source})?>();
-    var remaining = sources.length;
-    if (remaining == 0) return null;
+    if (sources.isEmpty) return null;
+    final results = <({double sort, String source})>[];
 
-    void settle() {
-      remaining--;
-      if (remaining <= 0 && !completer.isCompleted) completer.complete(null);
-    }
-
-    for (final src in sources) {
-      unawaited(
+    final pending = <Future<void>>[
+      for (final src in sources)
         _probeOne(src, keywords).then((sort) {
           if (sort != null && sort > 0) {
-            if (!completer.isCompleted) completer.complete((sort: sort, source: src.name));
-            return;
+            results.add((sort: sort, source: src.name));
           }
-          settle();
-        }, onError: (_) => settle()),
-      );
-    }
-    return completer.future;
+        }, onError: (_) {/* 单源失败只跳过，不拖垮整轮 */}),
+    ];
+
+    await Future.wait(pending).timeout(
+      probeDeadline,
+      onTimeout: () {
+        kLog('[追番] 全源探测到达总时限 ${probeDeadline.inSeconds}s，'
+            '采用已到手的 ${results.length} 条结果');
+        return const <void>[];
+      },
+    );
+
+    if (results.isEmpty) return null;
+    results.sort((a, b) => b.sort.compareTo(a.sort));
+    return results.first;
   }
 
   /// 单个源：按关键词顺序试，取到非空剧集列表就返回最大集数
   Future<double?> _probeOne(VideoSource src, List<String> keywords) async {
-    for (final kw in keywords) {
+    // 关键词收敛到前 3 个（主名 + 另一语言名 + 去括号版）：
+    // 检测只需集数，主名基本都命中；全试一遍会白白拖慢整源。
+    for (final kw in keywords.take(3)) {
       try {
         final hits = await src.search(kw).timeout(probeTimeout);
         if (hits.isEmpty) continue;
+        // 【v2.1.3】候选校验（扫描场景只做免网络的表面校验，不做反查——
+        // 宁可漏检也不把第一季/无关番的集数当成更新）：
+        final ranked = SourceMatch.rank(hits, kw);
+        if (ranked.isEmpty) continue;
+        if (SourceMatch.seasonMismatch(kw, ranked.first)) continue;
+        if (!SourceMatch.surfacePlausible(kw, ranked.first)) continue;
+        // 【v2.1.3】季数校验：fallbackTitle 用关键词（用户想要的番），
+        // bangumiDetail 内部会按「标题相似 + 季数一致」重排候选，
+        // 避免把第一季的集数当成第二季的更新（实测 7sefun 转生就是剑）
         final detail = await src
-            .bangumiDetail(fallbackTitle: _stripBracket(hits.first.title), seeds: hits)
+            .bangumiDetail(fallbackTitle: kw, seeds: hits)
             .timeout(probeTimeout);
         final maxSort = _maxSortOf(detail);
         if (maxSort != null && maxSort > 0) return maxSort;

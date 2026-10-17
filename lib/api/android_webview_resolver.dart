@@ -29,8 +29,12 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+// Android 专属 WebView 配置（混合内容模式 / 免手势起播）。
+// 通用层 webview_flutter 不暴露这两个开关，只能下钻到平台实现。
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 
 import 'play_resolver.dart';
+import 'diag_log.dart';
 
 /// 是否为媒体流地址
 bool isMediaUrl(String u) {
@@ -186,10 +190,40 @@ class AndroidWebViewResolver implements WebViewResolver {
 
     try {
       await ctrl.setJavaScriptMode(JavaScriptMode.unrestricted);
+      // 【桌面 UA · 关键】
+      //
+      // 原来这里用移动 UA（`Android 13; Pixel 6 ... Mobile Safari`），
+      // 手机端反馈「解析很慢、解析不出来」。原因是番剧站按 UA 分页面：
+      // 移动 UA 拿到的是另一套**移动播放器**，它往往
+      //   · 换用不同的播放内核，不在 document/window 层暴露 m3u8
+      //   · 或把 iframe 换成需要点击交互才起来的播放器
+      // 于是挂钩的 JS 嗅探一条都收不到，只能干等到超时。
+      //
+      // Windows 版走 EdgeCdpResolver（无头 Edge），UA 天然是桌面浏览器，
+      // 同一批源能解析出来 —— 这就是两端表现不一致的根源。
+      // 所以改用与桌面一致的 Chrome UA，让站点返回**与电脑上相同的**播放页。
+      // （Kazumi 的解析规则同样是按桌面页面结构写的。）
       await ctrl.setUserAgent(
-        'Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 '
-        '(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       );
+
+      // 【混合内容 · 关键】
+      //
+      // Android WebView 默认在 https 页面里**拦截** http 子资源。
+      // 实测大量源是「播放页 https、m3u8 http」的组合，被拦后嗅探同样
+      // 一条都收不到 → 表现就是「解析不出来」。
+      // webview_flutter 通用层没暴露这个开关，只能取 Android 专属实例。
+      try {
+        final plat = ctrl.platform;
+        if (plat is AndroidWebViewController) {
+          await plat.setMixedContentMode(MixedContentMode.alwaysAllow);
+          // 部分播放器要用户手势才起播；解析阶段没有真实手势，放开限制
+          await plat.setMediaPlaybackRequiresUserGesture(false);
+        }
+      } catch (e) {
+        kLog('[AndroidWebView] 混合内容设置失败（继续）: $e');
+      }
 
       // 【Kazumi 同款】内容嗅探走独立通道（不带后缀也必须采信）
       await ctrl.addJavaScriptChannel(

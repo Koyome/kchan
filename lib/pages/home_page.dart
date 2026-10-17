@@ -51,13 +51,13 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  Future<void> _load() async {
+  Future<void> _load({bool force = false}) async {
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
-      final days = await BangumiApiHolder.api.calendarFast();
+      final days = await BangumiApiHolder.api.calendarFast(force: force);
       // 按周一到周日排序，去掉空组
       days.sort((a, b) => a.weekday.compareTo(b.weekday));
       if (!mounted) return;
@@ -106,7 +106,7 @@ class _HomePageState extends State<HomePage> {
         ),
         actions: [
           IconButton(
-            onPressed: _loading ? null : _load,
+            onPressed: _loading ? null : () => _load(force: true),
             icon: _loading
                 ? const SizedBox(width: 17, height: 17, child: CircularProgressIndicator(strokeWidth: 1.7))
                 : const Icon(Icons.refresh, size: 20),
@@ -116,7 +116,7 @@ class _HomePageState extends State<HomePage> {
       ),
       body: RefreshIndicator(
         color: K.accent,
-        onRefresh: _load,
+        onRefresh: () => _load(force: true),
         child: _buildBody(cs),
       ),
     );

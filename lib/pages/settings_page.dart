@@ -4,6 +4,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../api/bangumi_api.dart';
+import '../api/danmaku_api.dart' show DandanCredentials;
 import '../api/follow_updates.dart';
 import '../api/kazumi_rules.dart' show BuiltinRules, RuleRegistry;
 import '../api/rule_update.dart';
@@ -117,8 +118,8 @@ class _SettingsPageState extends State<SettingsPage> {
                     controller: _customBaseCtl,
                     decoration: const InputDecoration(
                       labelText: '自建反代 / 自定义镜像（优先使用）',
-                      hintText: 'https://kchan-bgm.<你的子域>.workers.dev',
-                      helperText: '填根地址即可（不要带 /v0）。同一个 Worker 同时反代 API 与封面图片',
+                      hintText: 'https://bgm.kchan.top',
+                      helperText: '填根地址即可（不要带 /v0）。可填多个做冗余（换行分隔）—— 一个被限速时另一个顶上',
                       prefixIcon: Icon(Icons.dns_outlined, size: 18),
                     ),
                     onSubmitted: (v) => Store.settings.setApiBases(Store.settings.apiBases, custom: v.trim()),
@@ -304,11 +305,26 @@ class _SettingsPageState extends State<SettingsPage> {
             SwitchListTile(
               title: const Text('播放时加载弹幕', style: TextStyle(fontSize: 14)),
               subtitle: Text(
-                Store.settings.danmakuAppId.isEmpty
-                    // 默认走 B站：无需任何配置，实测可用
-                    ? '当前来源：哔哩哔哩（免配置）\n'
-                        '填入下方弹弹play凭证后会优先使用它'
-                    : '当前来源：弹弹play（已配置）+ 哔哩哔哩兜底',
+                // 【修】原来只判 `danmakuAppId.isEmpty`（用户手填的字段），
+                // 于是**打了内置凭证的包也显示「哔哩哔哩（免配置）」**，
+                // 手机上看起来就像「弹弹play 没接入」。
+                // 正确判据是 DandanCredentials.resolve 的结果：
+                // 用户填了用用户的，没填用编译期注入的。
+                () {
+                  final (id, _) = DandanCredentials.resolve(
+                    Store.settings.danmakuAppId,
+                    Store.settings.danmakuAppSecret,
+                  );
+                  if (id.isEmpty) {
+                    return '当前来源：哔哩哔哩（免配置）\n'
+                        '填入下方弹弹play凭证后会优先使用它';
+                  }
+                  final builtin = DandanCredentials.builtinAppId.isNotEmpty &&
+                      Store.settings.danmakuAppId.isEmpty;
+                  return builtin
+                      ? '当前来源：弹弹play（内置凭证，开箱即用）+ 哔哩哔哩兜底'
+                      : '当前来源：弹弹play（已配置）+ 哔哩哔哩兜底';
+                }(),
                 style: const TextStyle(fontSize: 11.5),
               ),
               value: Store.settings.danmakuEnabled,
@@ -840,7 +856,15 @@ class _SettingsPageState extends State<SettingsPage> {
                 style: TextStyle(fontSize: 10.5)),
             value: Store.settings.followAutoScan,
             activeThumbColor: K.accent,
-            onChanged: (v) => Store.settings.setFollowAutoScan(v),
+            onChanged: (v) {
+              Store.settings.setFollowAutoScan(v);
+              // 周期扫描跟着开关走（v2.1.1：常开场景每 30 分钟兜底扫一轮）
+              if (v) {
+                FollowUpdateService.instance.startAutoScan();
+              } else {
+                FollowUpdateService.instance.stopAutoScan();
+              }
+            },
           ),
         ],
       ),

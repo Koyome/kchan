@@ -58,6 +58,13 @@ class PlayerPage extends StatefulWidget {
   /// 进入播放页时选中的线路序号（对应 [lines] 的下标）
   final int startLineIndex;
 
+  /// 【v2.1.3】跨源续播回调（详情页注入）。
+  ///
+  /// 当「下一集/上一集」在当前源里找不到时调用：
+  /// 返回 true = 已经切到别的源并开始播（本页会被替换）；
+  /// false/null = 所有源都没有，播放页照旧提示「已经是最后一集」。
+  final Future<bool> Function(double fromSort, int delta)? crossEpisode;
+
   const PlayerPage({
     super.key,
     required this.subject,
@@ -72,6 +79,7 @@ class PlayerPage extends StatefulWidget {
     this.alternatives = const [],
     this.lines = const [],
     this.startLineIndex = 0,
+    this.crossEpisode,
   });
 
   @override
@@ -789,12 +797,15 @@ class _PlayerPageState extends State<PlayerPage> {
         // 解析成功 → 用本地播放器播（比 WebView 更流畅，支持倍速/拖动）
         setState(() => _statusText = '加载播放器…');
         try {
-          return await _startPlayback(PlayInfo(
+          final ok = await _startPlayback(PlayInfo(
             url: playUrl,
             type: stream.type,
             headers: stream.headers,
             adRanges: adRanges,
           ));
+          // 【v2.1.9】起播成功后后台预解析同线路下一集：换集零等待
+          if (ok) unawaited(_preloadNextEpisode(rule));
+          return ok;
         } catch (e) {
           // 两种解码后端都起播失败时，回到自动换源，不让异常中断整条链。
           kLog('[播放] 当前线路起播失败，尝试下一线路: $e');
@@ -993,6 +1004,8 @@ class _PlayerPageState extends State<PlayerPage> {
     _saveProgress();
     _outWatchdog?.cancel();
     _outWatchdog = null;
+    _autoNextTimer?.cancel();
+    _autoNextTimer = null;
     _deadStrikes = 0;
     _recoverCount = 0;
     if (_keepScreenOn) {
@@ -1474,6 +1487,80 @@ class _PlayerPageState extends State<PlayerPage> {
 
   bool _completedHandled = false;
 
+  // ── 【v2.1.9】下一集预解析（换集零等待）──────────────────────────
+  //
+  // 之前：看完一集 → 触发下一集 → 现场解析直链（3~8s，含预检）→ 才开播，
+  // 连续追番时每集之间都有一段「卡顿」。
+  // 现在：当前集起播成功后，后台**预解析**同线路的下一集直链（含预检与
+  // 广告扫描），10 分钟内切集直接命中 → 零等待开播；预载流起播失败
+  // （token 过期等）自动回退常规解析，不引入新失败面。
+  static const _preloadTtl = Duration(minutes: 10);
+  final Map<String, ({PlayInfo info, DateTime at})> _preloaded = {};
+  bool _preloading = false;
+
+  /// 预解析「当前线路的下一集」直链（后台、静默、失败无感）
+  Future<void> _preloadNextEpisode(KazumiRule rule) async {
+    if (_preloading || !mounted) return;
+    final eps = List<PlayerEpisodeOption>.of(_currentEpisodes)
+      ..sort((a, b) => a.sort.compareTo(b.sort));
+    final idx = eps.indexWhere((e) => e.sort == _epSort);
+    if (idx < 0 || idx + 1 >= eps.length) return; // 没有下一集
+    final next = eps[idx + 1];
+    final pre = _preloaded[next.pageUrl];
+    if (pre != null && DateTime.now().difference(pre.at) < _preloadTtl) {
+      return; // 已预载
+    }
+    _preloading = true;
+    final sw = Stopwatch()..start();
+    try {
+      final resolver = _resolver;
+      if (resolver == null) return;
+      ResolvedStream stream = await resolver.resolveEpisode(
+        episodeUrl: next.pageUrl,
+        rule: rule,
+        webviewTimeout: const Duration(seconds: 22),
+      );
+      if (stream.isEmpty) return;
+      final playUrl = _normalizeMediaUrl(stream.url);
+      // 预检 + 广告扫描并行（与主链路同款，保证预载流可直接起播）
+      final scanFuture = stream.isHls && stream.adRanges.isEmpty
+          ? withAdRanges(
+              ResolvedStream(
+                url: playUrl,
+                type: stream.type,
+                headers: stream.headers,
+                via: stream.via,
+              ),
+              stream.headers['Referer'] ?? '',
+            )
+          : Future.value(stream);
+      final pre2 = await _preflightPlayable(stream);
+      if (!pre2) {
+        kLog('[播放] 下一集「${next.title}」预解析被预检拒绝，放弃预载');
+        return;
+      }
+      final adRanges = (await scanFuture).adRanges;
+      _preloaded[next.pageUrl] = (
+        info: PlayInfo(
+          url: playUrl,
+          type: stream.type,
+          headers: stream.headers,
+          adRanges: adRanges,
+        ),
+        at: DateTime.now(),
+      );
+      kLog('[播放] 已预载下一集「${next.title}」直链'
+          '（${sw.elapsedMilliseconds}ms），切换零等待');
+    } catch (_) {
+      // 预载失败完全静默：切集时走常规解析即可
+    } finally {
+      _preloading = false;
+    }
+  }
+
+  /// 【v2.1.3】自动连播定时器（看完一集 → 自动下一集，可跨源）
+  Timer? _autoNextTimer;
+
   void _onCompleted() {
     if (_completedHandled) return;
     _completedHandled = true;
@@ -1481,7 +1568,15 @@ class _PlayerPageState extends State<PlayerPage> {
     Store.progress.markWatched(widget.subject, widget.episodeSort, epId: widget.episodeId);
     if (!mounted) return;
     if (Store.settings.autoNext) {
-      setState(() => _statusText = '已看完，标记为已看');
+      // 【v2.1.3】以前这里只改了状态文字、**并不会真的切下一集**（设置里
+      // 的「自动连播」等于空转）。现在真的切：3 秒缓冲后调用 _jumpEpisode(1)，
+      // 它会依次尝试当前线路 → 同源其他线路 → 其他源（新一集只有别的源
+      // 有时也能自动接上）。
+      setState(() => _statusText = '已看完，即将自动播放下一集…');
+      _autoNextTimer?.cancel();
+      _autoNextTimer = Timer(const Duration(seconds: 3), () {
+        if (mounted) _jumpEpisode(1);
+      });
     }
   }
 
@@ -1590,30 +1685,62 @@ class _PlayerPageState extends State<PlayerPage> {
     if (mounted) setState(() {});
   }
 
-  /// 上一集 / 下一集（依赖**当前线路**的分集列表）
-  void _jumpEpisode(int delta) {
+  /// 上一集 / 下一集
+  ///
+  /// 【v2.1.3 · 不让用户思考「源」】三级查找：
+  ///   ① 当前线路内的相邻集；
+  ///   ② 同源**其他线路**里集号紧邻的集（换线路，自动）；
+  ///   ③ **跨源**（详情页注入 [PlayerPage.crossEpisode]）：例如当前源只更到
+  ///      第 2 集、别的源已有第 3 集 —— 自动切过去播，用户无感。
+  /// 全部找不到才提示「已经最后一集」。
+  Future<void> _jumpEpisode(int delta) async {
     final eps = List<PlayerEpisodeOption>.of(_currentEpisodes)
       ..sort((a, b) => a.sort.compareTo(b.sort));
-    if (eps.isEmpty) {
-      _showHint('当前线路没有其他剧集');
-      return;
-    }
     final idx = eps.indexWhere((e) => e.sort == _epSort);
-    if (idx < 0) {
+
+    // ① 当前线路内
+    if (idx >= 0) {
+      final next = idx + delta;
+      if (next >= 0 && next < eps.length) {
+        await _switchEpisode(eps[next]);
+        return;
+      }
+    } else if (eps.isNotEmpty) {
       // 当前集不在本线路里（切线路后常见）：退化为「跳第一条」
-      _switchEpisode(eps.first);
+      await _switchEpisode(eps.first);
       return;
     }
-    final next = idx + delta;
-    if (next < 0) {
-      _showHint('已经是第一集');
-      return;
+
+    // ② 同源其他线路（按集号找紧邻的一集）
+    final all = <({int line, PlayerEpisodeOption ep})>[];
+    for (var i = 0; i < widget.lines.length; i++) {
+      for (final e in widget.lines[i].episodes) {
+        all.add((line: i, ep: e));
+      }
     }
-    if (next >= eps.length) {
-      _showHint('已经是最后一集');
-      return;
+    all.sort((a, b) => a.ep.sort.compareTo(b.ep.sort));
+    final pos = all.indexWhere((t) => t.ep.sort == _epSort);
+    if (pos >= 0) {
+      final p = pos + delta;
+      if (p >= 0 && p < all.length) {
+        final t = all[p];
+        if (t.line != _lineIndex) {
+          final lineName = widget.lines[t.line].name.isEmpty
+              ? '播放线路${t.line + 1}'
+              : widget.lines[t.line].name;
+          _showHint('切换到 $lineName');
+          setState(() => _lineIndex = t.line);
+        }
+        await _switchEpisode(t.ep);
+        return;
+      }
     }
-    _switchEpisode(eps[next]);
+
+    // ③ 跨源续播（详情页注入）
+    final handled = await (widget.crossEpisode?.call(_epSort, delta) ?? Future.value(false));
+    if (handled) return;
+
+    _showHint(delta > 0 ? '已经是最后一集' : '已经是第一集');
   }
 
   /// 切换播放线路（同一源内的「播放线路N」）。
@@ -1665,7 +1792,25 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   /// 选集（同一源内的其他分集）：重置尝试记录后按全新会话解析
+  ///
+  /// 【v2.1.9 · 预载加速】目标集的直链已被 [_preloadNextEpisode] 预解析
+  /// 且未过期时，跳过整个解析+预检流程**直接起播**（零等待）；
+  /// 预载流起播失败（token 过期等）自动回退常规解析，不引入新失败面。
   Future<void> _switchEpisode(PlayerEpisodeOption ep) async {
+    final pre = _preloaded.remove(ep.pageUrl);
+    final fresh = pre != null &&
+        DateTime.now().difference(pre.at) < _preloadTtl &&
+        _rule != null;
+    if (fresh) {
+      kLog('[播放] 命中预解析直链，零等待切集');
+      _triedSources.clear();
+      await _resetForSwitch(_rule!, ep.pageUrl, ep.title, ep.sort.toDouble());
+      unawaited(_loadDanmaku());
+      final ok = await _startPlayback(pre.info);
+      if (ok) return;
+      kLog('[播放] 预载流起播失败，回退常规解析');
+      // 继续走下面的常规路径
+    }
     _triedSources.clear();
     await _resetForSwitch(_rule!, ep.pageUrl, ep.title, ep.sort.toDouble());
     await _boot(overridePageUrl: ep.pageUrl, overrideRule: _rule, freshAttempt: true);
@@ -1720,6 +1865,7 @@ class _PlayerPageState extends State<PlayerPage> {
     _keySeekTimer?.cancel();
     _hintTimer?.cancel();
     _tipTimer?.cancel();
+    _autoNextTimer?.cancel();
     _keyFocus.dispose();
     WidgetsBinding.instance.removeObserver(_lifecycle);
     SystemChrome.setPreferredOrientations(

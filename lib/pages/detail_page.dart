@@ -7,9 +7,11 @@ import 'package:flutter/material.dart';
 
 import '../api/bangumi_api.dart';
 import '../api/diag_log.dart' show kLog;
+import '../api/episode_union.dart';
 import '../api/follow_updates.dart';
 import '../api/kazumi_rules.dart' show RuleRegistry;
 import '../api/source_groups.dart';
+import '../api/source_health.dart';
 import '../api/video_sources.dart';
 import '../models.dart';
 import '../store/local_store.dart';
@@ -46,16 +48,42 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
   /// 用户选中的播放源（线路）。空 = 自动取第一个可用源
   String _selectedSourceId = '';
 
-  /// 当前生效的源：优先用户选择，其次第一个可用源
+  /// 当前生效的源：优先用户选择，其次「集数最多」的可用源
+  ///
+  /// 【v2.1.1】默认源从「第一个可用」改为「集数最多」：
+  /// 各源更新速度不一，新番更新时常常只有个别源（如 DM84）有最新一集，
+  /// 取第一个可用源会把最新一集藏在卡片后面。集数并列时保持原顺序
+  /// （即仍为第一个可用源），不改变无更新时的体感。
   AggregatedSource? get _currentSource {
     final sel = _sources[_selectedSourceId];
-    if (sel != null && sel.error == null && sel.bangumi.episodes.isNotEmpty) {
+    if (sel != null && sel.error == null && sel.bangumi.hasPlayableLine) {
       return sel;
     }
+    AggregatedSource? best;
+    var bestSort = -1.0;
     for (final a in _sources.values) {
-      if (a.error == null && a.bangumi.episodes.isNotEmpty) return a;
+      if (a.error != null || !a.bangumi.hasPlayableLine) continue;
+      final sort = _maxEpisodeSort(a.bangumi);
+      if (sort > bestSort) {
+        best = a;
+        bestSort = sort;
+      }
     }
-    return null;
+    return best;
+  }
+
+  /// 一部番（含各线路）的最大集数；无剧集时为 0
+  static double _maxEpisodeSort(SourceBangumi b) {
+    var max = 0.0;
+    for (final r in b.roads) {
+      for (final e in r.episodes) {
+        if (e.sort > max) max = e.sort.toDouble();
+      }
+    }
+    for (final e in b.episodes) {
+      if (e.sort > max) max = e.sort.toDouble();
+    }
+    return max;
   }
 
   int _tab = 0; // 0 分集 1 详情/简介 2 角色 3 相关
@@ -108,47 +136,73 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
       _error = null;
     });
     try {
-      // 【v1.9.1 并行化】元数据与分集/角色/相关**同时**发出。
+      // 【v2.1.6 首屏拆分】关键路径只留 subject + episodes：
       //
-      // 旧实现是 `await subject()` 之后再 `Future.wait([episodes, characters, relations])`
-      // —— 4 个请求被拆成「1 + 3」两波，总耗时 = 第一波 + 第二波。
-      // 实测日志：`拉取条目元数据… → 元数据 OK` 花了 1.2s，后面 3 个再并行。
-      // 现在 4 个一起发，总耗时 = 最慢的那个。
+      // v1.9.1 曾把 4 个请求一起 `Future.wait`——但**等全部完成才渲染**，
+      // 「角色 / 相关」这两个没人首屏看的 tab 数据也会拖住首屏最坏 6 秒，
+      // 还把 `_loadSources`（播放源聚合，真正决定「能不能看」的）一起拖住。
+      // Kazumi 的做法就是角色/相关分 tab 懒加载。
       //
-      // 另外：`subject` 是唯一「失败即失败」的请求（其余都 catchError 成空），
-      // 因为封面/标题要靠它。
+      // 现在：subject + episodes 完成 → 立即渲染并**同时启动源聚合**；
+      // 角色/相关转后台，完成后单独 setState 补上（不阻塞任何东西）。
+      kLog('[详情] 拉取条目元数据 + 分集（首屏关键路径）…');
+
       final detailF = BangumiApiHolder.api.subject(widget.subjectId);
       final epsF = BangumiApiHolder.api
           .episodes(widget.subjectId)
           .then((v) => v.toList())
           .catchError((_) => <Episode>[]);
-      final charsF = BangumiApiHolder.api
+
+      // 后台补：角色 / 相关（各自失败只留空，不碰首屏）
+      unawaited(BangumiApiHolder.api
           .characters(widget.subjectId)
           .then((v) => v.toList())
-          .catchError((_) => <BgmCharacter>[]);
-      final relF = BangumiApiHolder.api
+          .then((chars) {
+        if (!mounted) return;
+        setState(() => _chars = chars);
+      }).catchError((_) {}));
+      unawaited(BangumiApiHolder.api
           .relations(widget.subjectId)
           .then((v) => v.toList())
-          .catchError((_) => <RelatedSubject>[]);
-
-      kLog('[详情] 并发拉取条目元数据 + 分集 + 角色 + 相关…');
-      final results = await Future.wait<Object>([detailF, epsF, charsF, relF]);
-      final detail = results[0] as SubjectDetail;
-      final eps = results[1] as List<Episode>;
-      final chars = results[2] as List<BgmCharacter>;
-      final rel = results[3] as List<RelatedSubject>;
+          .then((rel) {
+        if (!mounted) return;
+        setState(() => _related = rel);
+      }).catchError((_) {}));
+      // 【v2.1.10 · 逐项等待 + 分段日志】
+      // 原来用 `Future.wait([detailF, epsF])`：任一项抛错就整体失败，
+      // 而且外层 catch 不打日志 → 详情页会「静默卡死」，无法定位。
+      // 现在分开等、各带日志，谁出问题一眼可见。
+      final SubjectDetail detail;
+      List<Episode> eps;
+      try {
+        detail = await detailF;
+        kLog('[详情] ① 条目元数据到位: ${detail.displayName}');
+      } catch (e, st) {
+        kLog('[详情] ① 条目元数据失败: $e\n$st');
+        rethrow;
+      }
+      try {
+        eps = await epsF;
+        kLog('[详情] ② 分集到位: ${eps.length} 集');
+      } catch (e, st) {
+        // 分集失败不该拖死整页 —— 用空列表兜底，详情仍可浏览
+        kLog('[详情] ② 分集失败（用空列表兜底，不阻塞详情）: $e');
+        eps = const <Episode>[];
+      }
       kLog('[详情] 元数据 OK: ${detail.displayName}（分集 ${eps.length}）');
       if (!mounted) return;
       setState(() {
         _detail = detail;
         _episodes = eps.where((e) => e.type == 0).toList();
         if (_episodes.isEmpty) _episodes = eps;
-        _chars = chars;
-        _related = rel;
         _loading = false;
       });
       _loadSources(detail);
     } catch (e) {
+      // 【v2.1.10】必须打日志：原来这里只 setState 不打日志，
+      // 导致「详情页加载失败」在诊断日志里完全静默 ——
+      // 排查时看不到是谁抛的错，只能盲猜。
+      kLog('[详情] 加载失败: $e');
       if (!mounted) return;
       setState(() {
         _error = e.toString().replaceFirst('ApiException: ', '');
@@ -177,6 +231,7 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
       _sourceLoading = true;
       _sourceTried = true;
     });
+    _bangumiLookups = 0; // 每轮聚合重新计数（反查 Bangumi 限 3 次）
     final title = subject.displayName.isNotEmpty ? subject.displayName : subject.name;
     _sourceTitle = title;
     // 【v2.1.0】备用名：Bangumi 的中文名与日文名都记下。
@@ -186,14 +241,22 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
     final alt = (title == subject.nameCn) ? subject.name : subject.nameCn;
     _sourceAltTitle = alt.trim();
 
-    // 按「实测耗时」排序（未测过的排最后，用规则的解析方式做二级排序：
-    // 直链 > 接口 > 云播 > 人机验证）
+    // 排序：离线分类打底 + **被动健康记录**微调
+    //
+    // 被动记录的意思是：只在用户真实搜索时记一笔成败，**不发任何额外请求**。
+    // 连续失败 2 次的源排到最后（但仍会尝试），成功过的按实测耗时排。
+    // 30 分钟自动过期，所以源站恢复后会自动回到前面。
+    //
+    // 为什么不做启动探测：曾经试过并发探 86 个源，结果启动瞬间抢带宽，
+    // 把数据源请求拖成不稳定 —— 用户反馈「所有数据源不可达」。已撤回。
     final sources = SourceRegistry.active.toList()
       ..sort((a, b) {
         final ca = SourceClassifier.classify(a.rule);
         final cb = SourceClassifier.classify(b.rule);
-        final la = ca.latencyMs == 0 ? 99999 : ca.latencyMs;
-        final lb = cb.latencyMs == 0 ? 99999 : cb.latencyMs;
+        final la = SourceHealth.sortScore(a.rule.name,
+            staticFallback: ca.latencyMs);
+        final lb = SourceHealth.sortScore(b.rule.name,
+            staticFallback: cb.latencyMs);
         if (la != lb) return la.compareTo(lb);
         return ca.kind.index.compareTo(cb.kind.index);
       });
@@ -301,6 +364,8 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
           }
         } catch (_) {/* 备用名也失败，落回原错误 */}
       }
+      // 被动健康：这个源这次真的连不上，记一笔（连续 2 次才降权）
+      SourceHealth.reportFailure(s.name);
       _sources[s.id] = AggregatedSource(
           source: s, bangumi: SourceBangumi(title: title), error: '连接失败');
       kLog('[聚合] ${s.name} kw="$title" 失败(${sw.elapsedMilliseconds}ms): '
@@ -312,12 +377,43 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
   }
 
   Future<void> _fillSource(VideoSource s, String title, List<SourceSearchItem> hits, Stopwatch sw) async {
+    // 被动健康：搜索有命中就说明这个源此刻是通的，记下耗时。
+    // （放在方法开头，避免下面候选校验的 return 绕过统计。）
+    if (hits.isNotEmpty) {
+      SourceHealth.reportSuccess(s.name, sw.elapsedMilliseconds);
+    }
+    // 【v2.1.3】候选三重校验（目标 = 搜索关键词，即「用户想要的番」）：
+    //   ① 季数不符（候选是上一季/基础名条目）→ 拒；
+    //   ② 表面重合（归一化相等/包含/Jaccard）→ 过；
+    //   ③ 表面不过（典型：站内译名与 Bangumi 不同，如「转生成为魔剑」vs
+    //      「转生就是剑」）→ 用 **Bangumi 搜索反查**候选标题：能搜到本番
+    //      （前 3 条含 subject id）= 同一部番的另一种译名 → 过；否则拒。
+    // 实测：DM84 搜日文返回 28 条垃圾（首选「乙女游戏 第二季」，季数相同
+    // 骗过打分）→ 反查指向 264089 ≠ 本番 → 拒；moonci/FQDM 的正确条目
+    // 「转生成为魔剑(了)第二季」→ 反查命中 412008 → 保留。
+    final ranked = SourceMatch.rank(hits, title);
+    if (ranked.isNotEmpty) {
+      final best = ranked.first;
+      final mismatch = SourceMatch.seasonMismatch(title, best);
+      final plausible = mismatch ? false : await _candidatePlausible(title, best);
+      if (mismatch || !plausible) {
+        _sources[s.id] = AggregatedSource(
+            source: s,
+            bangumi: SourceBangumi(title: title),
+            error: mismatch ? '未收录（仅找到同名旧季）' : '未收录（候选与目标不符）');
+        kLog('[聚合] ${s.name} kw="$title" 弃用候选「${best.title}」'
+            '（${mismatch ? "季数不符" : "反查非本番"}）${sw.elapsedMilliseconds}ms');
+        return;
+      }
+    }
     if (hits.isEmpty) {
       _sources[s.id] = AggregatedSource(
           source: s, bangumi: SourceBangumi(title: title), error: '未收录');
     } else {
+      // 【v2.1.3】用搜索关键词（而非首条命中的标题）做季数校验的目标：
+      // 关键词才是「用户想要的番」，命中条目由 SourceMatch.rank 重排后择优
       final b = await s
-          .bangumiDetail(fallbackTitle: _stripBracket(hits.first.title), seeds: hits)
+          .bangumiDetail(fallbackTitle: title, seeds: hits)
           .timeout(const Duration(seconds: 15));
       _sources[s.id] = AggregatedSource(
           source: s, bangumi: b, error: b.episodes.isEmpty ? '未收录可播放剧集' : null);
@@ -325,27 +421,70 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
     kLog('[聚合] ${s.name} kw="$title" ok ${sw.elapsedMilliseconds}ms');
   }
 
+  /// 本页反查 Bangumi 的次数（每次聚合最多 3 次，防止多源垃圾各查一遍）
+  int _bangumiLookups = 0;
+
+  /// 候选可信性：先表面重合（免网络），不行就 Bangumi 搜索反查（译名词典）
+  Future<bool> _candidatePlausible(String target, SourceSearchItem best) async {
+    if (SourceMatch.surfacePlausible(target, best)) return true;
+    final s = _detail ?? widget.initial;
+    final sid = s?.id ?? 0;
+    if (sid <= 0) return false;
+    if (++_bangumiLookups > 3) return false;
+    try {
+      final r = await BangumiApiHolder.api.searchSubjects(best.title, limit: 5)
+          .timeout(const Duration(seconds: 10));
+      final hit = r.items.take(3).any((x) => x.id == sid);
+      if (hit) {
+        kLog('[聚合] 候选「${best.title}」反查 Bangumi 命中本番（id=$sid），判定为同番异译名');
+      }
+      return hit;
+    } catch (_) {
+      return false; // 反查失败按不可信处理（宁缺勿滥）
+    }
+  }
+
   /// 聚合出结果后，把「扫到的最新集数」回写给追番检测。
   ///
   /// 不回写会误报：用户在详情页刷新看到第 25 集，后台快照还停在 24，
   /// 下一轮定时扫描拿 25 比 24，又亮一次红点——可用户早看过了。
   /// 回写后基线跟着走，红点只在**真的**出新集时才亮。
+  ///
+  /// 【v2.1.1】取**所有源**的最大集数，而不是只看当前生效源：
+  /// 新番更新时常常只有个别源（如 DM84）有最新一集，只看当前源
+  /// 会把基线记低，下一轮后台扫描又会误报一次红点。
   void _recordFollowLatest() {
-    final agg = _currentSource;
-    if (agg == null) return;
-    double max = 0;
-    for (final r in agg.bangumi.roads) {
-      for (final e in r.episodes) {
-        if (e.sort > max) max = e.sort.toDouble();
+    var max = 0.0;
+    var maxSource = '';
+    for (final a in _sources.values) {
+      if (a.error != null || !a.bangumi.hasPlayableLine) continue;
+      final v = _maxEpisodeSort(a.bangumi);
+      if (v > max) {
+        max = v;
+        maxSource = a.source.name;
       }
     }
-    for (final e in agg.bangumi.episodes) {
-      if (e.sort > max) max = e.sort.toDouble();
+    // 【v2.1.3】并集选集的体检日志：一眼看出「有几集可播、每集来自谁」，
+    // 排查「源更新了但点不了」时直接看这行。
+    try {
+      final grid = _buildEpisodeGrid();
+      final playable = grid.where((g) => g.choices.isNotEmpty).length;
+      final bySource = <String, int>{};
+      for (final g in grid) {
+        final b = g.best;
+        if (b == null) continue;
+        bySource[b.tag.source.name] = (bySource[b.tag.source.name] ?? 0) + 1;
+      }
+      kLog('[选集] 并集共 ${grid.length} 格：可播 $playable 格'
+          '${grid.length > playable ? "（${grid.length - playable} 格所有源都没有）" : ""}'
+          '，最优来源分布 $bySource');
+    } catch (e) {
+      kLog('[选集] 并集统计失败：$e');
     }
     if (max <= 0) return;
     final s = _detail ?? widget.initial;
     if (s == null) return;
-    FollowUpdateService.instance.recordLatest(s.id, max, sourceName: agg.source.name);
+    FollowUpdateService.instance.recordLatest(s.id, max, sourceName: maxSource);
   }
 
   /// 手动刷新单条线路（卡片上的刷新按钮）
@@ -852,91 +991,169 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
   }
 
   Widget _episodeGrid() {
-    // 用「用户选中的源」（未选则第一个可用源）的分集
-    final usable = _currentSource;
-    if (_episodes.isEmpty && usable == null) {
+    // 【v2.1.3 · 对齐 Kazumi 的「源原生分集」模型】
+    //
+    // 旧实现：格子只渲染 Bangumi 分集，再拿「当前选中的源」去逐集匹配 ——
+    // 源没收到第 3 集时第 3 格就是「?」，用户以为软件没更新（实测 FQDM 等）。
+    // Kazumi 的做法是：分集列表 = 源自己的列表，源有几集就显示几集、全部可点，
+    // 用户不用理解「源」是什么。
+    //
+    // 现在把两者合起来：
+    //   格子 = Bangumi 分集 ∪ 各源实际收录的集（并集）；
+    //   每格只要能**从任意一条源**找到该集 → 可点，点击时自动挑最优源；
+    //   全部源都没有 → 才显示「?」。
+    final grid = _buildEpisodeGrid();
+    if (grid.isEmpty) {
       return const SliverToBoxAdapter(
-        child: EmptyHint(icon: Icons.playlist_remove, title: '暂无剧集信息', sub: 'Bangumi 未提供分集，且播放源未收录'),
+        child: EmptyHint(
+            icon: Icons.playlist_remove,
+            title: '暂无剧集信息',
+            sub: 'Bangumi 与播放源都未提供分集'),
       );
     }
 
     final s = _detail ?? widget.initial;
-    final totalBgm = _episodes.length;
+    final multiSource =
+        grid.any((g) => g.choices.length > 1) || _sources.length > 1;
 
     return SliverToBoxAdapter(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (totalBgm > 0)
-            Row(
-              children: [
-                Expanded(child: K.sectionLabel('剧集列表', Theme.of(context).colorScheme.onSurface)),
-                if (usable != null)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: Text(
-                      '来自 ${usable.source.name}',
-                      style: Theme.of(context)
-                          .textTheme
-                          .labelSmall
-                          ?.copyWith(fontSize: 10.5, color: K.accent.withValues(alpha: .85)),
-                    ),
+          Row(
+            children: [
+              Expanded(
+                  child: K.sectionLabel(
+                      '剧集列表', Theme.of(context).colorScheme.onSurface)),
+              if (multiSource)
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: Text(
+                    '共 ${grid.length} 集 · 自动选源',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        fontSize: 10.5,
+                        color: K.accent.withValues(alpha: .85)),
                   ),
-              ],
+                ),
+            ],
+          ),
+          GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+              maxCrossAxisExtent: 78,
+              childAspectRatio: 2.2,
+              mainAxisSpacing: 8,
+              crossAxisSpacing: 8,
             ),
-          if (totalBgm > 0)
-            GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                maxCrossAxisExtent: 78,
-                childAspectRatio: 2.2,
-                mainAxisSpacing: 8,
-                crossAxisSpacing: 8,
-              ),
-              itemCount: totalBgm,
-              itemBuilder: (_, i) {
-                final ep = _episodes[i];
-                final watched = s != null && Store.progress.isWatched(s.id, ep.sort);
-                final hit = _matchSourceEpisode(usable, ep.sort);
-                return AnimatedBuilder(
-                  animation: Store.progress,
-                  builder: (context, _) => _epTile(ep, watched, hit, usable, s),
-                );
-              },
-            ),
+            itemCount: grid.length,
+            itemBuilder: (_, i) {
+              final g = grid[i];
+              final watched =
+                  s != null && Store.progress.isWatched(s.id, g.label);
+              return AnimatedBuilder(
+                animation: Store.progress,
+                builder: (context, _) => _epTile(g, watched, s),
+              );
+            },
+          ),
         ],
       ),
     );
+  }
+
+  /// 判断一个聚合源是否可用于选集/播放
+  static bool _usable(AggregatedSource a) =>
+      a.error == null && a.bangumi.hasPlayableLine;
+
+  /// 构建「并集」分集格子（Bangumi 集 ∪ 源集）
+  ///
+  /// 算法本体在 `lib/api/episode_union.dart`（纯 Dart）：
+  /// 详情页与 `tool/verify_new_episode.dart` 共用同一份实现，
+  /// 验证工具跑的就是本页正在跑的代码。
+  List<UnionTile<AggregatedSource>> _buildEpisodeGrid() {
+    final sources = <(UnionSource, AggregatedSource)>[];
+    for (final agg in _sources.values) {
+      if (!_usable(agg)) continue;
+      sources.add((
+        UnionSource(
+          id: agg.source.id,
+          name: agg.source.name,
+          directPlay: agg.source.rule.isDirectPlay,
+          latencyMs: SourceClassifier.classify(agg.source.rule).latencyMs,
+          roads: [
+            for (final r in agg.bangumi.roads)
+              if (r.episodes.isNotEmpty) r.episodes,
+          ],
+          episodes: agg.bangumi.episodes,
+        ),
+        agg,
+      ));
+    }
+    return buildEpisodeUnion<AggregatedSource>(
+      bgmEpisodes: _episodes,
+      sources: sources,
+      hints: UnionRankHints(
+        selectedSourceId: _selectedSourceId,
+        currentSourceId: _currentSource?.source.id ?? '',
+      ),
+    );
+  }
+
+  /// 找「当前集之后/之前可播的下一集（可跨源）」——播放页自动连播用。
+  ///
+  /// 返回可以直接开播的目标；没有任何源有下一集时返回 null。
+  ({AggregatedSource agg, SourceEpisode ep, int lineIndex, Episode? bgm})?
+      _resolveAdjacentEpisode(double fromSort, int delta) {
+    final grid = _buildEpisodeGrid();
+    final target = fromSort.round();
+    var idx = grid.indexWhere((g) => g.key == target);
+    if (idx < 0) {
+      // 当前源用了全局集号（如第二季从第 13 集起）：按绝对话数定位
+      idx = grid.indexWhere((g) =>
+          g.bgm?.ep == target ||
+          g.choices.any((c) => c.ep.sort == target));
+    }
+    if (idx < 0) return null;
+    final next = idx + delta;
+    if (next < 0 || next >= grid.length) return null;
+    final g = grid[next];
+    final pick = g.best;
+    if (pick == null) return null;
+    return (agg: pick.tag, ep: pick.ep, lineIndex: pick.lineIndex, bgm: g.bgm);
   }
 
   /// 在选中源的**任意线路**里找这一集；返回剧集 + 线路序号。
   ///
   /// 相比旧版只扫合并列表，这里会优先返回「线路序号」，让播放页能直接
   /// 落到正确的播放线路上（而不是永远从线路1 开始）。
-  static ({SourceEpisode episode, int lineIndex})? _matchSourceEpisode(
-      AggregatedSource? agg, double sort) {
-    if (agg == null) return null;
-    return _matchInAnyLine(agg, sort);
-  }
+  ///
+  /// 【v2.1.3】改用「并集格子」，本方法不再被格子调用（并集候选已在
+  /// 构建时算好每集的候选源），保留给播放页换源等其它调用点。
 
-  Widget _epTile(
-    Episode ep,
-    bool watched,
-    ({SourceEpisode episode, int lineIndex})? hit,
-    AggregatedSource? usable,
-    Subject? s,
-  ) {
+  Widget _epTile(UnionTile<AggregatedSource> g, bool watched, Subject? s) {
     final cs = Theme.of(context).colorScheme;
-    final srcEp = hit?.episode;
-    final title = srcEp?.title.trim() ?? '';
+    final pick = g.best;
+    final cur = _currentSource;
+    final label = g.labelText;
+    // 两个「不打扰」的信息：
+    //  · 这集由别的源提供（不是当前源）→ 小字标出来源，用户不用疑惑为什么能点；
+    //  · 都拿不到 → 右下角「?」，点了给出解释。
+    final autoFrom =
+        (pick != null && cur != null && pick.tag.source.id != cur.source.id)
+            ? pick.tag.source.name
+            : '';
+    final sub = autoFrom.isNotEmpty
+        ? '来自 $autoFrom'
+        : (pick?.ep.title.trim() ?? '');
     return GestureDetector(
       onTap: () {
-        if (srcEp != null && usable != null) {
-          _playFromSource(usable, srcEp, s, bgmEpisode: ep, lineIndex: hit?.lineIndex ?? 0);
+        if (pick != null) {
+          _playFromSource(pick.tag, pick.ep, s,
+              bgmEpisode: g.bgm, lineIndex: pick.lineIndex);
         } else {
-          _showNoSourceDialog(ep);
+          _showNoSourceDialog(g);
         }
       },
       child: Container(
@@ -953,7 +1170,7 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    ep.sortLabel,
+                    label,
                     style: TextStyle(
                       fontFamily: K.monoFamily, fontFamilyFallback: K.monoFallback,
                       fontSize: 14,
@@ -961,16 +1178,22 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
                       color: watched ? K.accent : cs.onSurface,
                     ),
                   ),
-                  // 源站自己的集名（很多番和 Bangumi 的集号对不上，显示出来才不会点错）
-                  if (title.isNotEmpty && title != ep.sortLabel)
+                  // 源站自己的集名（很多番和 Bangumi 的集号对不上，显示出来才不会点错）；
+                  // 这集来自其他源时换成「来自 X」——比集名更重要的信息
+                  if (sub.isNotEmpty && sub != label)
                     Padding(
                       padding: const EdgeInsets.only(top: 1, left: 3, right: 3),
                       child: Text(
-                        title,
+                        sub,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         textAlign: TextAlign.center,
-                        style: TextStyle(fontSize: 8.5, height: 1.1, color: cs.onSurface.withValues(alpha: .5)),
+                        style: TextStyle(
+                            fontSize: 8.5,
+                            height: 1.1,
+                            color: autoFrom.isNotEmpty
+                                ? K.accent.withValues(alpha: .8)
+                                : cs.onSurface.withValues(alpha: .5)),
                       ),
                     ),
                 ],
@@ -982,8 +1205,8 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
                 top: 4,
                 child: Icon(Icons.check_circle, size: 11, color: K.accent),
               ),
-            // 该集在选中源里找不到 → 明确标出来，而不是点了才弹窗
-            if (srcEp == null)
+            // 所有源都没有这一集 → 明确标出来，而不是点了才弹窗
+            if (pick == null)
               Positioned(
                 right: 4,
                 bottom: 3,
@@ -995,34 +1218,38 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
     );
   }
 
-  void _showNoSourceDialog(Episode ep) {
+  void _showNoSourceDialog(UnionTile<AggregatedSource> g) {
+    final ep = g.bgm;
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('第 ${ep.sortLabel} 集'),
+        title: Text('第 ${g.labelText} 集'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(ep.displayName.isEmpty ? '暂无标题' : ep.displayName, style: const TextStyle(fontSize: 14)),
-            if (ep.airdate.isNotEmpty) ...[
+            Text((ep?.displayName.isNotEmpty ?? false) ? ep!.displayName : g.title,
+                style: const TextStyle(fontSize: 14)),
+            if ((ep?.airdate ?? '').isNotEmpty) ...[
               const SizedBox(height: 6),
-              Text('放送日期：${ep.airdate}', style: Theme.of(ctx).textTheme.bodySmall),
+              Text('放送日期：${ep!.airdate}', style: Theme.of(ctx).textTheme.bodySmall),
             ],
             const SizedBox(height: 12),
-            Text('该集在当前播放源中未找到可播地址。可尝试在「设置 → 播放源」启用更多源，或到源站搜索。',
+            Text('所有已启用的播放源都还没有这一集。新番刚更新后源站可能延迟收录，'
+                '稍等片刻再进入本页即会重新检测；也可到「设置 → 播放源」启用更多源。',
                 style: Theme.of(ctx).textTheme.bodySmall?.copyWith(height: 1.6)),
           ],
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('关闭')),
-          FilledButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              if (_detail != null) Store.progress.markWatched(_detail!, ep.sort, epId: ep.id);
-            },
-            child: const Text('标记已看'),
-          ),
+          if (ep != null)
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                if (_detail != null) Store.progress.markWatched(_detail!, ep.sort, epId: ep.id);
+              },
+              child: const Text('标记已看'),
+            ),
         ],
       ),
     );
@@ -1042,8 +1269,40 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
     Episode? bgmEpisode,
     int lineIndex = 0,
   }) async {
+    final route = _playerRoute(agg, se, s,
+        bgmEpisode: bgmEpisode, lineIndex: lineIndex);
+    if (route == null) return;
+    await Navigator.of(context).push(route);
+  }
+
+  /// 【v2.1.3】播放页的跨源续播回调（见 [PlayerPage.crossEpisode]）。
+  ///
+  /// 当前源没有「下一集」时，从**所有源**里找紧邻的一集，用 pushReplacement
+  /// 直接换一个新的播放页（承载新源的线路/备选数据），用户看到的是「播完了
+  /// 自动接着播下一集」，不需要知道背后换了源。
+  Future<bool> _crossEpisodeJump(double fromSort, int delta) async {
+    if (!mounted) return false;
+    final t = _resolveAdjacentEpisode(fromSort, delta);
+    if (t == null) return false;
+    final route = _playerRoute(t.agg, t.ep, _detail ?? widget.initial,
+        bgmEpisode: t.bgm, lineIndex: t.lineIndex);
+    if (route == null) return false;
+    kLog('[选集] 跨源续播 → ${t.agg.source.name} 第 ${t.ep.sort} 集'
+        '（本集来自第 $fromSort 集之后）');
+    Navigator.of(context).pushReplacement(route);
+    return true;
+  }
+
+  /// 构造播放页路由（含换源备选与线路数据）
+  MaterialPageRoute<void>? _playerRoute(
+    AggregatedSource agg,
+    SourceEpisode se,
+    Subject? s, {
+    Episode? bgmEpisode,
+    int lineIndex = 0,
+  }) {
     final subject = s ?? widget.initial;
-    if (subject == null) return;
+    if (subject == null) return null;
     final ep = bgmEpisode;
 
     // 构造「换线路」候选：同一集在其他可用源上的地址
@@ -1062,7 +1321,8 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
     });
     final alts = <PlayerAlternative>[];
     for (final other in others) {
-      final hit = _matchInAnyLine(other, se.sort.toDouble());
+      final hit =
+          _matchInAnyLine(other, se.sort.toDouble(), absolute: ep?.ep);
       if (hit == null) continue;
       alts.add(PlayerAlternative(
         sourceName: other.source.name,
@@ -1074,7 +1334,7 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
       ));
     }
 
-    await Navigator.of(context).push(MaterialPageRoute(
+    return MaterialPageRoute(
       builder: (_) => PlayerPage(
         subject: subject,
         rule: agg.source.rule,
@@ -1086,8 +1346,9 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
         startLineIndex: lineIndex,
         alternatives: alts,
         lines: _playerLinesOf(agg),
+        crossEpisode: _crossEpisodeJump,
       ),
-    ));
+    );
   }
 
   /// 把某个聚合源的线路转成播放页用的模型
@@ -1120,19 +1381,26 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
   }
 
   /// 在某个源的**任意线路**里找指定集数（换源时用；顺带记住是第几条线路）
+  ///
+  /// 【v2.1.2】支持多候选集号：先按 Bangumi 的 `sort`（本季内编号）匹配，
+  /// 再按 `ep`（绝对话数）兜底 —— 有些源用全局编号（第二季从第 13 集起），
+  /// 只匹配 sort 会整季对不上。
   static ({SourceEpisode episode, int lineIndex})? _matchInAnyLine(
-      AggregatedSource agg, double sort) {
-    final target = sort.round();
+      AggregatedSource agg, double sort, {int? absolute}) {
+    final targets = <int>{sort.round()};
+    if (absolute != null && absolute > 0) targets.add(absolute);
     final roads = agg.bangumi.roads.where((r) => r.episodes.isNotEmpty).toList();
-    if (roads.isNotEmpty) {
-      for (var i = 0; i < roads.length; i++) {
-        for (final e in roads[i].episodes) {
-          if (e.sort == target) return (episode: e, lineIndex: i);
+    for (final target in targets) {
+      if (roads.isNotEmpty) {
+        for (var i = 0; i < roads.length; i++) {
+          for (final e in roads[i].episodes) {
+            if (e.sort == target) return (episode: e, lineIndex: i);
+          }
         }
       }
-    }
-    for (final e in agg.bangumi.episodes) {
-      if (e.sort == target) return (episode: e, lineIndex: 0);
+      for (final e in agg.bangumi.episodes) {
+        if (e.sort == target) return (episode: e, lineIndex: 0);
+      }
     }
     return null;
   }
@@ -1317,8 +1585,7 @@ class _DetailPageState extends State<DetailPage> with WidgetsBindingObserver {
 /// Kazumi 的做法就是默认只展示第一条 +「展开全部 N 个结果」，这里沿用，
 /// 但把「结果条目」换成了**播放线路**（K酱 的聚合已经替用户选好了条目，
 /// 用户真正要选的是线路）。
-class _PlaySourcesSheet extends StatefulWidget {
-  final Subject? subject;
+class _PlaySourcesSheet extends StatefulWidget {  final Subject? subject;
   final List<AggregatedSource> groups;
   final String? autoExpandId;
   final int Function(AggregatedSource) lineCountOf;

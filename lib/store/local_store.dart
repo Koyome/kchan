@@ -137,6 +137,43 @@ class HistoryEntry {
 class SettingsStore extends ChangeNotifier {
   static const _kApiBases = 'api_bases';
   static const _kCustomBase = 'custom_base';
+
+  /// 首次启动时的默认反代地址（**用户开箱即用，不用自己填**）
+  ///
+  /// ## 这个 bug 是怎么被发现的
+  ///
+  /// 站长在自己电脑上跑得很好、有 6 条数据源且都很快；但发给别人之后，
+  /// 别人只有 4 条、还特别卡。原因是**配置差异**而不是代码差异：
+  ///
+  /// | | 自建反代 | 内置源 | 合计 |
+  /// | --- | --- | --- | --- |
+  /// | 站长机器 | 2 条（手动填过） | 4 条 | **6 条** |
+  /// | 新用户 | **0 条（空）** | 4 条 | **4 条** |
+  ///
+  /// 内核只认用户设置里那一项，默认空值等于「一个反代都不用」，于是新用户
+  /// 全部流量打到 `api.bgm.tv`（国内直连实测 21 秒超时）和几个死镜像上。
+  ///
+  /// 所以这里给一个**非空的默认值**，让任何一台新机器第一次打开就有反代。
+  ///
+  /// ## 为什么是两条
+  ///
+  /// 这两条是实测都可用的（各 4 次 `/v0/subjects/400602`）：
+  ///
+  ///     https://bgm.kchan.top   759ms   4/4
+  ///     https://api.kchan.top   722ms   4/4
+  ///
+  /// 但 Cloudflare 到国内的链路会抖（同一域名有时 700ms、有时 9s），
+  /// 单条一出问题整轮就慢。填两条后它们都进 `bases` 池，配合竞速 + 冷却表，
+  /// 一条被限速另一条顶上 —— 这正是站长自己机器上「6 条都很快」的配置。
+  ///
+  /// 注意：**不要**默认用 `https://kchan.top`。那是官网 Worker（包体 1.1MB，
+  /// 还把 /calendar 再转一跳给 api.kchan.top），实测 8.8s / 0~1 成功，
+  /// 明显不适合当 API 基址。用设置页填／清空仍可自行改。
+  ///
+  /// 多条用换行分隔（`_apply()` 支持换行 / `|` / `,` / `;`）。
+  static const _kDefaultCustomBase =
+      'https://bgm.kchan.top\nhttps://api.kchan.top';
+
   static const _kImageProxyMode = 'img_proxy_mode';
   static const _kImageProxyPrefix = 'img_proxy_prefix';
   static const _kThemeMode = 'theme_mode'; // 0 系统 1 浅色 2 深色
@@ -167,7 +204,9 @@ class SettingsStore extends ChangeNotifier {
   bool _spReady = false;
 
   List<String> apiBases = List.of(BangumiApi.presetBases);
-  String customBase = '';
+  // 默认就给反代（不是空串）。SharedPreferences 读不到时也能带着默认值跑，
+  // 否则「prefs 不可用」的机器会退化成 0 条反代 —— 正是本次 bug 的形态。
+  String customBase = _kDefaultCustomBase;
   int imageProxyMode = 0;
   String imageProxyPrefix = '';
   int themeMode = 0;
@@ -221,7 +260,17 @@ class SettingsStore extends ChangeNotifier {
       _spReady = false;
     }
     if (_spReady) {
-      customBase = _sp.getString(_kCustomBase) ?? '';
+      // 【v2.1.10】空字符串也回落到默认反代。
+      //
+      // 只判 `?? 默认值` 是不够的：老版本可能已经把空串存进了
+      // shared_preferences（用户从没进过设置页，但某处写了 `''`），
+      // 那样 `getString` 返回 ''（不是 null），默认值就不会生效 ——
+      // 这正是「有的机器 6 条源、有的机器 4 条源」的另一半原因。
+      // 现在 empty 与 null 一视同仁，升级上来也会自动补上反代。
+      final savedCustomBase = _sp.getString(_kCustomBase);
+      customBase = (savedCustomBase == null || savedCustomBase.trim().isEmpty)
+          ? _kDefaultCustomBase
+          : savedCustomBase;
       apiBases = _sp.getStringList(_kApiBases) ?? List.of(BangumiApi.presetBases);
       imageProxyMode = _sp.getInt(_kImageProxyMode) ?? 0;
       imageProxyPrefix = _sp.getString(_kImageProxyPrefix) ?? '';
@@ -277,8 +326,23 @@ class SettingsStore extends ChangeNotifier {
   }
 
   void _apply() {
+    // 【v2.1.10 · 多反代冗余】
+    //
+    // 用户反馈「一下卡一下流畅，必须要稳定」。单个反代地址即使优选过 IP，
+    // 被限速时也会整轮拖慢 —— 这里让「自建反代」也支持**填多个**，
+    // 与图片反代共用同一套分隔语法（换行 / `|` / `,` / `;`）。
+    //
+    // 多个地址都会进 `bases` 池，配合竞速 + 冷却表，
+    // 某个被限速时另一个顶上 —— 这就是「保险」。
+    final customs = <String>[];
+    for (final part in customBase.split(RegExp(r'[\n\r|,;]+'))) {
+      final t = part.trim();
+      if (t.isEmpty || !t.startsWith('http')) continue;
+      if (!customs.contains(t)) customs.add(t);
+    }
+
     final list = <String>[
-      if (customBase.trim().isNotEmpty) customBase.trim(),
+      ...customs,
       ...apiBases,
     ];
     // 去重保序
@@ -296,7 +360,13 @@ class SettingsStore extends ChangeNotifier {
     // 这里两个字段一起设，两种写法都能生效。
     ImageProxy.mode = imageProxyMode;
     ImageProxy.customPrefix = imageProxyPrefix;
-    ImageProxy.customImageBase = imageProxyPrefix;
+    // 【v2.1.9 · 一处填、两处用】封面图片反代未单独配置时，自动复用
+    // 「自建反代」地址——自建的 Worker 同时反代 API 与 /pic/ 图片
+    // （见桌面《K酱-反代Worker-最优版.js》），一份地址两处生效。
+    // 单独填过图片反代的用户不受影响（各自独立，优先级照旧）。
+    ImageProxy.customImageBase = imageProxyPrefix.trim().isNotEmpty
+        ? imageProxyPrefix
+        : (customBase.trim().startsWith('http') ? customBase.trim() : '');
     proxySettings.followSystem = proxyFollowSystem;
     proxySettings.manualEnabled = proxyManualEnabled;
     proxySettings.manualUrl = proxyManualUrl;

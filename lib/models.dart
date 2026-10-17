@@ -311,6 +311,46 @@ class CalendarDay {
   final String weekdayCn;
   final List<Subject> items;
   const CalendarDay({required this.weekday, required this.weekdayCn, this.items = const []});
+
+  /// 【v2.1.10 · 磁盘缓存】序列化。
+  ///
+  /// 之前没有这个方法，导致 `jsonEncode(日历数据)` 抛
+  /// `Converting object to an encodable object failed: Instance of 'CalendarDay'`
+  /// —— 磁盘缓存**从来没写成功过**，而且异常被 `catch (_) {}` 静默吞掉。
+  /// 教训：兜底 catch 至少要把错误打进日志。
+  ///
+  /// 复用 [Subject.toSnapshot]（id/name/nameCn/image/air_date/air_weekday），
+  /// 正好覆盖日历卡片渲染需要的字段，缓存文件也小（60 部约 30KB）。
+  Map<String, dynamic> toJson() => {
+        'weekday': weekday,
+        'weekdayCn': weekdayCn,
+        'items': [for (final s in items) s.toSnapshot()],
+      };
+
+  /// 反序列化（供磁盘缓存预热用）。
+  ///
+  /// 容错优先：单条坏数据只丢它自己，不让整份缓存失效。
+  static CalendarDay? fromJson(dynamic j) {
+    if (j is! Map) return null;
+    final wd = (j['weekday'] as num?)?.toInt();
+    if (wd == null || wd < 1 || wd > 7) return null;
+    final raw = j['items'];
+    final items = <Subject>[];
+    if (raw is List) {
+      for (final e in raw) {
+        try {
+          if (e is Map) items.add(Subject.fromSnapshot(e.cast<String, dynamic>()));
+        } catch (_) {
+          // 单条坏数据跳过，不影响其余
+        }
+      }
+    }
+    return CalendarDay(
+      weekday: wd,
+      weekdayCn: j['weekdayCn']?.toString() ?? '',
+      items: items,
+    );
+  }
 }
 
 /// 追番更新快照：一部番「上次扫到的最新集数」

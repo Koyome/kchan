@@ -58,6 +58,160 @@ class SourceSearchItem {
   });
 }
 
+/// 【v2.1.3 · 季数校验】搜索命中重排（对齐 Kazumi 的人工挑结果，但自动化）
+///
+/// ## 为什么必须有这个
+///
+/// 站点搜索顺序不可靠：搜「转生就是剑 第二季」，7sefun 把**第一季**排第一
+/// （实测返回 12 集 = S1 的集数），旧实现直接取第一条 → 详情页/更新检测
+/// 全部用错条目 —— 用户看到的「更新」其实是上一季的集数。
+/// Kazumi 的做法是把搜索结果全部列出来**让用户人工挑**（`source_sheet`）；
+/// kchan 自动取首条，就必须把「挑」这一步补上：季数一致 > 标题相似 > 原顺序。
+class SourceMatch {
+  /// 把 [seeds] 按「与 [target] 的匹配度」从高到低重排（稳定：同分保持原序）
+  static List<SourceSearchItem> rank(List<SourceSearchItem> seeds, String target) {
+    final t = target.trim();
+    if (seeds.length <= 1 || t.isEmpty) return seeds;
+    final tNorm = normalizeTitle(t);
+    final tSeason = seasonNumberOf(t);
+
+    int score(SourceSearchItem s) {
+      final hNorm = normalizeTitle(s.title);
+      var sc = 0;
+      if (hNorm == tNorm) {
+        sc += 1000;
+      } else if (hNorm.contains(tNorm) || tNorm.contains(hNorm)) {
+        sc += 500;
+      }
+      final hSeason = seasonNumberOf(s.title);
+      if (tSeason != null) {
+        // 目标有季数：命中季数一致最好；没标季数的（多半是第一季/总集篇）降权
+        sc += hSeason == tSeason ? 300 : (hSeason == null ? -150 : -300);
+      } else {
+        // 目标本身没标季数：命中也带季数的（如第三季）不加分不减分
+        sc += hSeason == null ? 50 : 0;
+      }
+      sc += (bigramJaccard(tNorm, hNorm) * 100).round();
+      return sc;
+    }
+
+    // 稳定排序（同分保持站点原顺序）
+    final keyed = <(int, SourceSearchItem, int)>[
+      for (var i = 0; i < seeds.length; i++) (i, seeds[i], score(seeds[i])),
+    ];
+    keyed.sort((a, b) {
+      final d = b.$3.compareTo(a.$3);
+      return d != 0 ? d : a.$1.compareTo(b.$1);
+    });
+    return [for (final k in keyed) k.$2];
+  }
+
+  /// 从标题里提取季数；null = 没有季数标记
+  static int? seasonNumberOf(String raw) {
+    final t = raw.replaceAll(RegExp(r'\s+'), '').toLowerCase();
+    // 第N季/期/部（阿拉伯或中文数字）
+    final m = RegExp(r'第([0-9一二三四五六七八九十]+)[季期部]').firstMatch(t);
+    if (m != null) return _cnToInt(m.group(1)!);
+    // 「N期」（日文习惯：第3期 常写作 3期）
+    final m2 = RegExp(r'([0-9]{1,2})[季期]').firstMatch(t);
+    if (m2 != null) {
+      final v = int.tryParse(m2.group(1)!);
+      if (v != null && v >= 1 && v <= 30) return v;
+    }
+    // Season 2 / S2（词边界，避免误伤普通英文）
+    final m3 = RegExp(r'(?:season|s)([0-9]{1,2})(?![0-9])').firstMatch(t);
+    if (m3 != null) {
+      final v = int.tryParse(m3.group(1)!);
+      if (v != null && v >= 1 && v <= 30) return v;
+    }
+    // 罗马数字：Unicode Ⅱ Ⅲ Ⅳ / 字母 II III IV（词边界）
+    const unicode = {'ⅱ': 2, 'ⅲ': 3, 'ⅳ': 4, 'ⅴ': 5, 'ⅵ': 6};
+    for (final e in unicode.entries) {
+      if (t.contains(e.key)) return e.value;
+    }
+    final m4 = RegExp(r'(?:^|[^a-z0-9])(ii|iii|iv)(?:[^a-z0-9]|$)').firstMatch(t);
+    if (m4 != null) return {'ii': 2, 'iii': 3, 'iv': 4}[m4.group(1)!];
+    // 续/続 结尾（续作）→ 2（保守）
+    if (RegExp(r'(続|续)(編|篇)?$').hasMatch(t)) return 2;
+    return null;
+  }
+
+  /// 标题归一化：去空白/括号字符/标点，转小写
+  static String normalizeTitle(String raw) => raw
+      .replaceAll(RegExp(r'[\s（）()\[\]【】「」『』・:：,，.。!！?？~～\-—_×x/|]'), '')
+      .toLowerCase();
+
+  /// 去掉季数后缀后的「基础名」（「转生就是剑 第二季」→「转生就是剑」）
+  static String baseTitleOf(String raw) {
+    var t = normalizeTitle(raw);
+    t = t
+        .replaceAll(RegExp(r'第[0-9一二三四五六七八九十]+[季期部]'), '')
+        .replaceAll(RegExp(r'[0-9]{1,2}[季期]'), '')
+        .replaceAll(RegExp(r'season[0-9]{1,2}'), '')
+        .replaceAll(RegExp(r'ⅱ|ⅲ|ⅳ|ⅴ|ⅵ'), '')
+        .replaceAll(RegExp(r'(?<![a-z0-9])(ii|iii|iv)(?![a-z0-9])'), '')
+        .replaceAll(RegExp(r'(続編?|续(篇)?)$'), '');
+    return t;
+  }
+
+  /// 【表面可信】候选标题与目标是否有表面重合（归一化相等/包含/Jaccard≥0.25）。
+  /// 不发网络请求；跨语言译名（日文目标 vs 中文候选）会落空——那一步交给
+  /// 「Bangumi 反查」（见 detail_page 的候选校验）。
+  static bool surfacePlausible(String target, SourceSearchItem best) {
+    final t = normalizeTitle(target);
+    final h = normalizeTitle(best.title);
+    if (t.isEmpty || h.isEmpty) return false;
+    if (t.contains(h) || h.contains(t)) return true;
+    return bigramJaccard(t, h) >= 0.25;
+  }
+
+  /// 【季数不符判定】目标明确是第 [tSeason] 季，而最佳候选要么季数不符、
+  /// 要么「标题 == 去季数的基础名」（= 大概率就是上一季/合集条目）。
+  /// 返回 true = 这条候选不该用（宁缺勿滥：S1 的 12 集污染并集，
+  /// 用户会点到第一季的内容）。
+  static bool seasonMismatch(String target, SourceSearchItem best) {
+    final tSeason = seasonNumberOf(target);
+    if (tSeason == null) return false;
+    final hSeason = seasonNumberOf(best.title);
+    if (hSeason == tSeason) return false;
+    if (hSeason != null) return true; // 季数明确不同
+    // 候选没标季数：标题恰等于基础名 → 就是上一季的条目
+    final base = baseTitleOf(target);
+    return base.isNotEmpty && normalizeTitle(best.title) == base;
+  }
+
+  /// 字符二元组 Jaccard 相似度（0~1，中日文标题够用）
+  static double bigramJaccard(String a, String b) {
+    if (a.isEmpty || b.isEmpty) return 0;
+    Set<String> grams(String s) {
+      if (s.length == 1) return {s};
+      return {for (var i = 0; i + 2 <= s.length; i++) s.substring(i, i + 2)};
+    }
+
+    final ga = grams(a);
+    final gb = grams(b);
+    final inter = ga.intersection(gb).length;
+    final union = ga.union(gb).length;
+    return union == 0 ? 0 : inter / union;
+  }
+
+  static int _cnToInt(String s) {
+    const digits = {
+      '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+      '六': 6, '七': 7, '八': 8, '九': 9,
+    };
+    if (int.tryParse(s) != null) return int.parse(s);
+    if (s == '十') return 10;
+    final m = RegExp(r'^([一二三四五六七八九])?十([一二三四五六七八九])?$').firstMatch(s);
+    if (m != null) {
+      final a = m.group(1) != null ? digits[m.group(1)!]! : 1;
+      final b = m.group(2) != null ? digits[m.group(2)!]! : 0;
+      return a * 10 + b;
+    }
+    return digits[s] ?? 0;
+  }
+}
+
 /// 一个番剧（源站维度）
 class SourceBangumi {
   final String title;
@@ -425,16 +579,22 @@ class RuleVideoSource implements VideoSource {
     List<SourceSearchItem> seeds = const [],
   }) async {
     // 【v2.1.0】首条命中未必是目标条目：
-    // 新番常有同名旧作/总集篇/真人版/上一季，搜索排第一的可能是它们，
-    // 抓回来的详情页要么分集为空、要么根本不是这部番。
-    // 现在依次尝试前几条命中，直到拿到**非空分集**为止。
+    // 新番常有同名旧作/总集篇/真人版/上一季，搜索排第一的可能是它们。
+    // 【v2.1.3】先按「标题相似度 + 季数一致」重排（SourceMatch.rank）——
+    // 实测 7sefun 搜「转生就是剑 第二季」把第一季排第一（12 集），
+    // 不重排会把第一季的分集当成第二季的更新。
+    final ranked = SourceMatch.rank(seeds, fallbackTitle ?? '');
     final candidates = <String>[
-      for (final s in seeds.take(3))
+      for (final s in ranked.take(3))
         if (s.url.trim().isNotEmpty) s.url,
       if (seeds.isEmpty && categoryId != null) '${rule.baseURL}$categoryId',
     ];
     if (candidates.isEmpty) {
       return SourceBangumi(title: fallbackTitle ?? '');
+    }
+    if (candidates.length > 1 || ranked.first.title != (fallbackTitle ?? '')) {
+      kLog('[源详情] ${rule.name} 候选重排后首选「${ranked.first.title}」'
+          '${ranked.length > 1 ? "（共 ${ranked.length} 条候选）" : ""}');
     }
 
     final parser = KazumiParser(rule);
@@ -482,14 +642,15 @@ class RuleVideoSource implements VideoSource {
     }
 
     // 合并去重（所有线路的集数合集，UI 默认展示这个）
-    final seen = <String>{};
-    final eps = <SourceEpisode>[];
-    for (final e in detail.allEpisodes) {
-      final key = '${e.sort}|${e.title}';
-      if (seen.add(key)) {
-        eps.add(SourceEpisode(title: e.title, sort: e.sort, pageUrl: e.url));
-      }
-    }
+    //
+    // 【v2.1.2】去重逻辑上移到 `RuleBangumiDetail.allEpisodes`（按集号去重、
+    // 优先保留标题真解析出集号的条目）。这里曾按 `sort|标题` 去重，导致同一
+    // 集号的不同写法（「第2集」/「第02集」）被算成两集 —— 卡片显示「收录 3
+    // 集」，格子里却只有 2 个集号能点（实测 FQDM）。
+    final eps = <SourceEpisode>[
+      for (final e in detail.allEpisodes)
+        SourceEpisode(title: e.title, sort: e.sort, pageUrl: e.url),
+    ];
 
     if (eps.isEmpty && seeds.isNotEmpty) {
       // 兜底：搜索命中本身可能就是分集列表

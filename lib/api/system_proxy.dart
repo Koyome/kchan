@@ -21,6 +21,7 @@
 library;
 
 import 'dart:io' show HttpClient, HttpOverrides, Platform, SecurityContext;
+import 'ip_pin.dart';
 import 'dart:ffi' as ffi;
 import 'package:ffi/ffi.dart' show calloc;
 
@@ -325,6 +326,15 @@ class KProxyHttpOverrides extends HttpOverrides {
   HttpClient createHttpClient(SecurityContext? context) {
     final c = super.createHttpClient(context);
     c.findProxy = kProxyFindProxy;
+    // 【优选 IP】全 App 所有 HttpClient 的统一出口 —— 图片、弹幕、抓页都受益。
+    //
+    // 历史教训（别再犯）：
+    //   ① 工厂里**必须**按 uri.scheme / uri.port 连接。写成「一律 443 + TLS」
+    //      会让所有 http:// 请求失败 —— 播放源抓页大量是 http，表现为
+    //      「解析不出来」。
+    //   ② install() 里**不要**再加「有代理就跳过」的门禁。用户的 Windows
+    //      系统代理若残留，会导致优选 IP 整体失效 → 数据源退回坏 IP → 不稳。
+    IpPin.install(c);
     return c;
   }
 }

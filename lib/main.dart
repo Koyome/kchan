@@ -14,6 +14,9 @@ import 'store/local_store.dart';
 import 'pages/detail_page.dart';
 import 'theme.dart';
 import 'api/diag_log.dart';
+import 'api/ip_pin.dart';
+import 'api/source_health.dart';
+import 'api/bangumi_api.dart';
 import 'api/child_process_manager.dart';
 import 'api/follow_updates.dart';
 import 'api/js_gate.dart';
@@ -123,6 +126,22 @@ Future<void> main() async {
     _syncDiag('step: proxy done');
   } catch (e) {
     debugPrint('installProxyOverrides failed: $e');
+  }
+
+  // ---------------------------------------------------------------------------
+  // 【优选 IP 预热】
+  //
+  // 后台并发探测一组 Cloudflare 边缘 IP，挑最快的钉住（约 3 秒）。
+  // 不 await：首页第一个请求通常在首帧后才发出，那时往往已完成。
+  //
+  // ⚠ 不要在这里加「探 86 个播放源」之类的重活 —— 实测会抢带宽，
+  //   把数据源请求拖成不稳定。
+  // ---------------------------------------------------------------------------
+  if (!kIsWeb) {
+    unawaited(IpPin.select().catchError((Object e) {
+      debugPrint('[IpPin] 预热失败: $e');
+      return null;
+    }));
   }
 
   final e2eSubject = int.tryParse(Platform.environment['KCHAN_E2E_SUBJECT'] ?? '');
@@ -238,6 +257,22 @@ Future<void> _warmUpAfterFirstFrame() async {
   }
   flushDiagLog(); // 关键节点：把启动日志真正落盘
 
+  // ①.2 预热 Bangumi 磁盘缓存（v2.1.10）。
+  //
+  // 把上次成功抓到的「本季放送表 / 搜索页」读回内存 —— 首页首帧即可渲染，
+  // 不用等 2 秒网络请求。网络刷新照常在后台跑（拿到新数据会覆盖并重新落盘）。
+  //
+  // 放在规则库之后、规则更新之前：它只是读一个几十 KB 的 JSON，
+  // 但不能晚于首页构造，否则首页第一次 calendar() 已经错过窗口。
+  try {
+    final swc = Stopwatch()..start();
+    await BangumiApi.warmDiskCache();
+    kLog('[启动] Bangumi 磁盘缓存预热完成（${swc.elapsedMilliseconds}ms）');
+  } catch (e) {
+    // 缓存预热失败绝不能影响启动
+    kLog('[启动] Bangumi 磁盘缓存预热失败（忽略）: $e');
+  }
+
   // ①.5 启动自动检查规则更新（后台静默）。
   //
   // 对齐 Kazumi 的启动检查：拉远程目录 → 版本比对 → 下载校验 → 覆盖合并。
@@ -266,6 +301,8 @@ Future<void> _warmUpAfterFirstFrame() async {
   );
   if (Store.settings.followAutoScan) {
     unawaited(FollowUpdateService.instance.scan());
+    // 周期兜底：软件常开时也能在新一集上线后尽快发现（30 分钟一轮）
+    FollowUpdateService.instance.startAutoScan();
   }
 
   // ② 反爬闸门钩子：纯赋值，无 IO

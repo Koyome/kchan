@@ -67,7 +67,52 @@ class DanmakuEntry {
       );
 }
 
-/// 弹弹play 客户端（第二源，需要开放平台凭证）
+/// 弹弹play 开放平台凭证的**编译期默认值**
+///
+/// ## 为什么用 `String.fromEnvironment` 而不是直接写常量
+///
+/// 本项目的 GitHub 仓库是**公开**的。AppSecret 一旦提交上去，任何人都能拿去
+/// 消耗配额，甚至导致应用被封。所以凭证**不写进源码**，而是在构建时注入：
+///
+/// ```powershell
+/// flutter build windows --release `
+///   --dart-define=DANDAN_APPID=xxx `
+///   --dart-define=DANDAN_APPSECRET=xxx
+/// ```
+///
+/// 好处：
+///   · 源码里只有空字符串，推到公开仓库不泄露；
+///   · 打出来的包凭证已固化进 app.so → 用户**开箱即用**，无需任何配置；
+///   · 用户仍可在「设置 → 弹幕」填自己的凭证覆盖它。
+///
+/// ## 优先级
+///
+///   用户设置（设置页填写） > 编译期注入 > 空
+///
+/// 空值时该源不可用并自动跳过 —— 不报错、不影响播放。
+class DandanCredentials {
+  /// 编译期注入的 AppId（未注入时为空）
+  static const String builtinAppId =
+      String.fromEnvironment('DANDAN_APPID', defaultValue: '');
+
+  /// 编译期注入的 AppSecret（未注入时为空）
+  static const String builtinAppSecret =
+      String.fromEnvironment('DANDAN_APPSECRET', defaultValue: '');
+
+  /// 是否有内置凭证
+  static bool get hasBuiltin =>
+      builtinAppId.isNotEmpty && builtinAppSecret.isNotEmpty;
+
+  /// 解析最终使用的凭证：用户填写优先，否则用内置
+  static (String, String) resolve(String userAppId, String userSecret) {
+    if (userAppId.trim().isNotEmpty && userSecret.trim().isNotEmpty) {
+      return (userAppId.trim(), userSecret.trim());
+    }
+    return (builtinAppId, builtinAppSecret);
+  }
+}
+
+/// 弹弹play 客户端（需要开放平台凭证）
 class DandanplaySource implements DanmakuSource {
   DandanplaySource({this.appId = '', this.appSecret = '', http.Client? client})
       : _c = client ?? http.Client();
@@ -188,18 +233,19 @@ class DandanplaySource implements DanmakuSource {
 
 /// 弹幕调度器：按优先级依次尝试各源
 class DanmakuApi {
+  /// [appId] / [appSecret] 传用户在设置页填的值；留空则回退到
+  /// 编译期注入的内置凭证（见 [DandanCredentials]）。
   DanmakuApi({
-    this.appId = '',
-    this.appSecret = '',
+    String appId = '',
+    String appSecret = '',
     this.danmuApiBaseUrl = '',
   }) {
-    _dandan = DandanplaySource(appId: appId, appSecret: appSecret);
+    // 用户填了就用用户的，没填就用编译期注入的（打出来的包开箱即用）
+    final (id, secret) = DandanCredentials.resolve(appId, appSecret);
+    _dandan = DandanplaySource(appId: id, appSecret: secret);
     _bili = BilibiliDanmakuSource();
     _agg = DanmuApiSource(baseUrl: danmuApiBaseUrl);
   }
-
-  final String appId;
-  final String appSecret;
 
   /// 自建 danmu_api 聚合实例地址（空 = 未配置）。
   ///
@@ -239,10 +285,22 @@ class DanmakuApi {
     //   3. B站直连 —— 免配置、快，但只覆盖其番剧库
     // 【v2.0.0 · 顺序优化】快的放前面：B站直连命中约 85% 且只需 0.4~2.4s，
     // 聚合实例要 1~5s。原先聚合优先会让每部番都白等几秒才回落到 B站。
+    // 优先级（用户指定 + 实测依据）：
+    //
+    //   1. **弹弹play** —— 覆盖最广，且实测**比 B站 还快**：
+    //      真实凭证压测 8 部番，合计中位数 **1622ms**
+    //      （匹配 457ms + 拉取 1135ms），命中 8/8。
+    //      含 B站**没有上架**的番（实测《进击的巨人》2342 条、
+    //      《我推的孩子》714 条 —— B站直连对这两部是 0 条）。
+    //      放第一还能省掉「B站先失败一次再回退」的双倍等待。
+    //   2. **B站直连** —— 免配置兜底；凭证失效/额度用尽时仍保证有弹幕。
+    //      注意它只覆盖番剧库约 85%，且未收录的番要等一次搜索超时才失败，
+    //      所以不宜再放第一。
+    //   3. **danmu_api 聚合实例** —— 用户自建才有，响应 1~5s，最慢，放最后。
     final sources = <DanmakuSource>[
+      if (_dandan.available) _dandan,
       if (_bili.available) _bili,
       if (_agg.available) _agg,
-      if (_dandan.available) _dandan,
     ];
     if (sources.isEmpty) {
       onNotice?.call('未配置可用的弹幕源');

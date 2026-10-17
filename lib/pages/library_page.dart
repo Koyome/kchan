@@ -45,7 +45,7 @@ class _LibraryPageState extends State<LibraryPage> {
   void initState() {
     super.initState();
     // 进页面时补扫一次：启动那轮可能已过去几小时（软件常开的场景）。
-    // 不 force —— 距上次不足 3h 会被 scan() 自己节流掉，等于没成本。
+    // 不 force —— 距上次不足 scanInterval 会被 scan() 自己节流掉，等于没成本。
     unawaited(FollowUpdateService.instance.scan());
   }
 
