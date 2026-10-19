@@ -36,7 +36,7 @@
   --f1:#181715;  --f1-ink:#e8e8e3;
 
   --pad:24px;            /* 一对边距，到处用 */
-  --gap-sec:clamp(88px,11vw,180px);
+  --gap-sec:clamp(72px,8.5vw,132px);
   --r:0px;               /* 直角，与方向一致 */
 
   /* 页面只用五级：small / body / lead / head / display。
@@ -283,7 +283,8 @@ kbd{font-family:inherit;font-size:var(--step-small);background:var(--bg);color:v
 /* ── FAQ：问题索引，一次一个答案 ────────────────────────────────────── */
 .faq-list{margin-top:clamp(26px,3.4vw,44px);max-width:60ch}
 /* 与 CTA 拉开：两段间距必须明显大于段内间距，否则上一段的尾句会被读成下一段的眉标 */
-.faq{padding-bottom:clamp(40px,5.5vw,96px)}
+.faq{padding-top:clamp(88px,9vw,140px);
+  padding-bottom:clamp(16px,2.2vw,40px)}
 .faq-list details{margin:0}
 .faq-list summary{padding:16px 0;font-size:var(--step-body);font-weight:500;cursor:pointer;list-style:none;
   display:flex;justify-content:space-between;align-items:center;gap:16px;
@@ -311,7 +312,7 @@ kbd{font-family:inherit;font-size:var(--step-small);background:var(--bg);color:v
 .alt span{font-size:var(--step-small);opacity:.6}
 
 /* ── 页脚：设计的收尾，不是站点地图 ─────────────────────────────────── */
-footer{padding:var(--gap-sec) var(--pad) 48px;max-width:1240px;margin:0 auto}
+footer{padding:clamp(64px,6.5vw,104px) var(--pad) 48px;max-width:1240px;margin:0 auto}
 .foot-mark{font-size:var(--step-display);font-weight:500;letter-spacing:-.055em;
   line-height:.9;margin:0 0 clamp(32px,4.4vw,60px)}
 .foot-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:clamp(20px,3vw,40px)}
@@ -382,3 +383,11 @@ html.no-js .reveal{opacity:1;transform:none}
 @media (max-width:560px){
   .sched-days button{min-width:0;padding:11px 2px;letter-spacing:-.02em}
 }
+
+/* ── 免责声明：页面末尾，安静的一小段，不加边框 ───────────────────── */
+.disclaimer{max-width:1240px;margin:0 auto;
+  padding:clamp(40px,5vw,72px) var(--pad) clamp(24px,3vw,44px)}
+.disclaimer h2{font-size:var(--step-lead);letter-spacing:-.02em}
+.disc{max-width:64ch;margin-top:clamp(16px,2vw,24px);display:grid;
+  gap:clamp(8px,1vw,12px)}
+.disc p{font-size:var(--step-small);line-height:1.65;color:var(--muted)}
