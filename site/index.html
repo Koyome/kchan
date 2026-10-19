@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>K酱 — Windows 上的追番播放器</title>
-<meta name="description" content="K酱是 Windows 上的追番播放器。聚合 86 条线路，按真实网络体检挑出能用的；这条断了自动换下一条。免安装，解压即用。">
+<meta name="description" content="K酱是 Windows 上的追番播放器。本季放送表就在首页，86 条线路自动体检，断了自动换下一条。免安装。">
 <link rel="icon" href="app_icon.ico">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -16,7 +16,6 @@
   <a class="mark" href="#">K酱</a>
   <nav>
     <a href="#lines">线路</a>
-    <a href="#reach">连接</a>
     <a href="#rest">功能</a>
     <a href="#faq">常见问题</a>
   </nav>
@@ -30,33 +29,20 @@
     <div class="hero-copy">
       <h1 class="reveal">打开就知道<br>今天看什么</h1>
 
-      <p class="lede reveal">
-        K酱 是 Windows 上的追番播放器。本季 100 部番剧的放送表就在首页，
-        按星期排好，打开就能挑今晚看什么。
-      </p>
+      <p class="lede reveal">Windows 上的追番播放器。本季放送表就在首页。</p>
 
-      <ul class="points reveal">
-        <li>
-          <b>86 条线路，只留还活着的</b>
-          <span>聚合来的线路里站长跑路、域名过期是常态。每次播放前先做一遍网络体检，能连上的才进候选。</span>
-        </li>
-        <li>
-          <b>这条不通，它自己换下一条</b>
-          <span>当前线路解析失败或播放中途出错，按体检顺序换下一条，换成功才上屏。</span>
-        </li>
-        <li>
-          <b>弹幕、倍速、无边框全屏都有</b>
-          <span>弹幕接弹弹play，支持 0.5× 到 3× 倍速、选集选线路；全屏真的铺满并盖住任务栏。</span>
-        </li>
-      </ul>
-
+      <div class="hero-stats reveal">
+        <div><b>0.7s</b><span>首页数据</span></div>
+        <div><b>100 部</b><span>本季在播</span></div>
+        <div><b>86 条</b><span>解析规则</span></div>
+      </div>
 
       <div class="hero-actions reveal">
         <a class="btn btn-lg" id="dl-win" href="#download">
           下载 Windows 版
           <span class="btn-meta">v2.1.10 · 53 MB</span>
         </a>
-        <p class="note">免安装 · 解压即用 · 安卓版在做</p>
+        <p class="note">免安装 · 解压即用</p>
       </div>
     </div>
 
@@ -80,10 +66,6 @@
       <ul class="sched-list" id="sched-list" aria-live="polite">
         <li class="sched-empty">正在载入本季放送表…</li>
       </ul>
-
-      <p class="sched-foot">
-        本季 100 部，数据来自 Bangumi 番组计划，经自建反代实测拉取。
-      </p>
     </div>
   </section>
 
@@ -91,8 +73,8 @@
   <section class="band" id="lines">
     <div class="row">
       <div class="col-text reveal">
-        <h2>还活着的线路，通常不到十条</h2>
-        <p>聚合来的线路里，站长跑路、域名过期、被墙是常态。K酱 每次解析前先做一遍网络体检，把真的能连上的排进候选，不能用的直接跳过。你不会坐在那里等一个早就没了的站点转圈。</p>
+        <h2>线路自己体检，坏的不等你</h2>
+        <p>每次解析前先测一遍，连不上的直接跳过。</p>
       </div>
 
       <div class="col-frag reveal">
@@ -131,27 +113,9 @@
       </div>
 
       <div class="col-text reveal">
-        <h2>这条不通，它自己换下一条</h2>
-        <p>当前线路解析失败，或者播放中途出错，K酱 会按体检结果换下一条，换成功才上屏。三条试完都没结果，才会告诉你失败。</p>
-        <ul class="mini">
-          <li><b>先跑最快的三条</b><span>不等全部体检完，先让能用的上屏</span></li>
-          <li><b>失败线路进冷却</b><span>120 秒内不再重试，不空等</span></li>
-          <li><b>失败原因写清楚</b><span>哪条试过、什么错，都写进日志</span></li>
-        </ul>
+        <h2>断了就换下一条</h2>
+        <p>换成功才上屏，不用你手动切。</p>
       </div>
-    </div>
-  </section>
-
-  <!-- ══════════════ 段 3 · 连接与数字 ══════════════ -->
-  <section class="band" id="reach">
-    <h2 class="wide reveal">番剧数据被墙？走自己搭的反代</h2>
-    <p class="wide body reveal">Bangumi 的官方接口在国内不稳定。K酱 支持填自建反代地址，也能把域名固定到实测最快的节点上，首页数据从 4 秒降到 0.7 秒。</p>
-
-    <div class="tiles reveal">
-      <div class="tile"><b>0.7s</b><span>首页数据（自建反代，实测中位）</span></div>
-      <div class="tile"><b>100 部</b><span>本季放送表，一次拉全</span></div>
-      <div class="tile"><b>86</b><span>内置解析规则</span></div>
-      <div class="tile"><b>25/25</b><span>反代连续请求成功次数</span></div>
     </div>
   </section>
 
@@ -169,9 +133,9 @@
            width="1290" height="1284" loading="lazy" decoding="async"></figure>
   </section>
 
-  <!-- ══════════════ 段 4 · 其余功能 ══════════════ -->
+  <!-- ══════════════ 段 3 · 其余功能 ══════════════ -->
   <section class="band" id="rest">
-    <h2 class="wide reveal">播放器该有的，这里都有</h2>
+    <h2 class="wide reveal">播放器该有的都有</h2>
 
     <div class="board">
       <div class="slot slot-wide reveal">
@@ -189,7 +153,7 @@
             <li><span>字号</span><b>中</b></li>
           </ul>
         </div>
-        <p><b>弹幕</b> 接的是弹弹play，带 SHA-256 签名。开关、透明度、字号都能调。</p>
+        <p><b>弹幕</b> 接弹弹play，签名校验，样式可调。</p>
       </div>
 
       <div class="slot reveal">
@@ -203,7 +167,7 @@
           </ul>
           <div class="scales"><i>0.5×</i><i>1×</i><i class="on">1.5×</i><i>2×</i><i>3×</i></div>
         </div>
-        <p><b>倍速与线路</b> 0.5× 到 3×，选集、选线路、切画面比例。</p>
+        <p><b>倍速与线路</b> 0.5× 到 3×，选集、选线路。</p>
       </div>
 
       <div class="slot reveal">
@@ -213,9 +177,9 @@
             <div class="win-i"><span>1280 × 720</span><i>窗口</i></div>
             <div class="win-i on"><span>1920 × 1080</span><i>无边框全屏</i></div>
           </div>
-          <p class="frag-note">铺满屏幕并盖住任务栏，退出后精确还原原来的窗口位置和大小。</p>
+          <p class="frag-note">铺满屏幕并盖住任务栏，退出后还原。</p>
         </div>
-        <p><b>真·无边框全屏</b> 不是把窗口放到最大，是真的铺满，退出还原。</p>
+        <p><b>真·无边框全屏</b> 不是最大化，是铺满。</p>
       </div>
 
       <div class="slot reveal">
@@ -226,9 +190,9 @@
             <li><span>音频</span><b>正常</b></li>
             <li><span>掉帧检测</span><b>已开启</b></li>
           </ul>
-          <p class="frag-note">检测到「有声音没画面」会在后台重建输出，不用你手动切线路。</p>
+          <p class="frag-note">检测到「有声音没画面」会在后台重建输出。</p>
         </div>
-        <p><b>看门狗</b> 有声音没画面时自动恢复，不用你动手。</p>
+        <p><b>看门狗</b> 有声音没画面时自动恢复。</p>
       </div>
 
       <div class="slot reveal">
@@ -241,7 +205,7 @@
             <li><kbd>Esc</kbd><span>退出全屏</span></li>
           </ul>
         </div>
-        <p><b>快捷键</b> 空格暂停、方向键快进退、F 全屏、Esc 退出。</p>
+        <p><b>快捷键</b> 空格暂停、F 全屏、Esc 退出。</p>
       </div>
 
       <div class="slot reveal">
@@ -254,21 +218,19 @@
             <li><span>账号系统</span><b>没有</b></li>
           </ul>
         </div>
-        <p><b>记录只在本机</b> 追番、历史、设置都在一个文件里，没有账号，不传服务器。</p>
+        <p><b>记录只在本机</b> 没有账号，不上传。</p>
       </div>
     </div>
   </section>
 
-  <!-- ══════════════ 段 5 · 常见问题 ══════════════ -->
+  <!-- ══════════════ 段 4 · 常见问题 ══════════════ -->
   <section class="band faq" id="faq">
     <h2 class="wide reveal">常见问题</h2>
     <div class="faq-list reveal">
-      <details><summary>需要安装吗？</summary><p>不用。下载 zip 解压，双击 K酱.exe 就能跑。想卸载直接删文件夹，不留注册表项。</p></details>
-      <details><summary>番剧数据是哪来的？</summary><p>元数据来自 Bangumi 番组计划。播放地址由 86 条解析规则从公开的第三方站点取，规则对齐 KazumiRules。</p></details>
-      <details><summary>为什么有的番搜不到？</summary><p>K酱 自己不存资源，只做解析。某个番如果所有线路都没有，就播放不了。这种情况它会明确告诉你，不会假装在加载。</p></details>
-      <details><summary>安卓版呢？</summary><p>在做。这个版本只发 Windows，安卓要等播放内核和横竖屏都调完。</p></details>
-      <details><summary>记录会上传吗？</summary><p>不会。追番、历史、设置全在本机一个文件里，没有账号系统。</p></details>
-      <details><summary>要花钱吗？</summary><p>不要。程序本身免费，也不含广告。</p></details>
+      <details><summary>需要安装吗？</summary><p>不用，解压双击就能跑。</p></details>
+      <details><summary>番剧数据是哪来的？</summary><p>元数据来自 Bangumi，播放地址由 86 条规则解析。</p></details>
+      <details><summary>为什么有的番搜不到？</summary><p>K酱 不存资源，所有线路都没有就播不了。</p></details>
+      <details><summary>安卓版呢？</summary><p>在做，敬请期待。</p></details>
     </div>
   </section>
 
@@ -285,7 +247,7 @@
         <span>敬请期待</span>
       </div>
     </div>
-    <p class="note reveal">下载走自建反代，国内直连即可。也可以到 <a href="https://github.com/Koyome/kchan/releases/download/v2.1.10/Kchan-Windows-v2.1.10.zip">GitHub 原始地址</a> 或 <a href="https://github.com/Koyome/kchan/releases">全部版本</a>。</p>
+    <p class="note reveal">也可以到 <a href="https://github.com/Koyome/kchan/releases">GitHub 全部版本</a>。</p>
   </section>
 
 </main>
@@ -295,8 +257,8 @@
   <div class="foot-grid">
     <div><b>下载</b><a href="#download">Windows v2.1.10</a><span>Android 敬请期待</span></div>
     <div><b>源码</b><a href="https://github.com/Koyome/kchan">github.com/Koyome/kchan</a></div>
-    <div><b>致谢</b><span>Bangumi 番组计划（番剧数据）</span><span>弹弹play（弹幕）</span><span>KazumiRules（解析规则）</span><span>media_kit / libmpv（播放内核）</span></div>
-    <div><b>说明</b><span>本站不含任何影视资源，只做聚合与播放。</span></div>
+    <div><b>致谢</b><span>Bangumi 番组计划</span><span>弹弹play</span><span>KazumiRules</span><span>media_kit / libmpv</span></div>
+    <div><b>说明</b><span>本站不含影视资源，只做聚合。</span></div>
   </div>
 </footer>
 

@@ -181,7 +181,12 @@
         if (/\.zip$/i.test(a.name) && /win/i.test(a.name)) { pick = a; break; }
       }
       if (!pick) pick = rel.assets[0];
-      dlBig.href = pick.browser_download_url;
+
+      // 【不要动 href】
+      // 按钮默认指向同源 /dl/（Worker 反代，实测 3.9MB/s）。
+      // 曾经这里写成 `dlBig.href = pick.browser_download_url`，把地址
+      // 换成了 github.com 直链 —— 国内实测 0.02MB/s，等于让用户下不动。
+      // 这里只更新版本号与体积文案。
 
       var mb = (pick.size / 1024 / 1024).toFixed(0) + ' MB';
       var tag = (rel.tag_name || '').replace(/^v/i, '');

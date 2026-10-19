@@ -111,11 +111,13 @@ p + p{margin-top:.7em}
 .hero-copy{padding-top:clamp(4px,3vw,40px)}
 .hero .lede{margin-top:clamp(18px,2.2vw,28px);max-width:40ch;
   font-size:var(--step-body);line-height:1.5}
-/* 首屏要点：四行，每行一句粗体结论 + 一句说明 */
-.points{list-style:none;margin:clamp(22px,2.8vw,34px) 0 0;padding:0;display:grid;gap:clamp(12px,1.5vw,18px);max-width:46ch}
-.points li{display:grid;gap:3px}
-.points b{font-weight:500;font-size:var(--step-body);letter-spacing:-.015em}
-.points span{font-size:var(--step-small);color:var(--muted);line-height:1.5}
+/* 首屏三个数字：极简一行，不加任何边框（house rule：禁止细线） */
+.hero-stats{display:flex;flex-wrap:wrap;gap:clamp(22px,3.2vw,48px);
+  margin-top:clamp(24px,3vw,36px)}
+.hero-stats div{display:grid;gap:2px}
+.hero-stats b{font-weight:500;font-size:var(--step-lead);letter-spacing:-.025em;
+  font-variant-numeric:tabular-nums}
+.hero-stats span{font-size:var(--step-small);color:var(--muted)}
 .hero-actions{margin-top:clamp(22px,3vw,36px)}
 @media (max-width:1000px){
   .hero{grid-template-columns:1fr;gap:30px}
@@ -165,17 +167,12 @@ p + p{margin-top:.7em}
   padding-right:max(var(--pad),calc((100vw - 1240px)/2 + var(--pad)));
   padding-bottom:var(--gap-sec)}
 .band.dark .col-text p{color:var(--f1-ink);opacity:.78}
-.band.dark .mini span{color:var(--f1-ink);opacity:.72}
 .band .lede{margin-top:clamp(18px,2.4vw,28px)}
 .wide{max-width:20ch}
 
 .row{display:grid;grid-template-columns:1fr 1fr;gap:clamp(28px,5vw,80px);align-items:start}
 .col-text h2{max-width:16ch}
 .col-text p{margin-top:clamp(16px,2vw,24px);color:var(--ink);max-width:46ch}
-.mini{list-style:none;margin:clamp(22px,3vw,34px) 0 0;padding:0;display:grid;gap:14px}
-.mini li{display:grid;grid-template-columns:auto 1fr;gap:12px;align-items:baseline}
-.mini b{font-weight:500;font-size:var(--step-body);white-space:nowrap}
-.mini span{font-size:var(--step-small);color:var(--muted)}
 
 /* ── 界面片段：这是页面主素材（方向要求：软件的界面就是它的素材）─────── */
 .frag{background:var(--bg);color:var(--ink)}
@@ -255,8 +252,6 @@ kbd{font-family:inherit;font-size:var(--step-small);background:var(--bg);color:v
 .keys li span{color:var(--muted);margin-left:auto}
 
 /* ── 数字块 ─────────────────────────────────────────────────────────── */
-.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:2px;margin-top:clamp(32px,4.4vw,56px);
-  background:var(--bg)}
 .tile{background:var(--surface);padding:clamp(20px,2.6vw,32px);display:grid;gap:.35em;align-content:start}
 .tile b{font-size:var(--step-head);font-weight:500;letter-spacing:-.045em;
   line-height:1;font-variant-numeric:tabular-nums}
@@ -273,6 +268,15 @@ kbd{font-family:inherit;font-size:var(--step-small);background:var(--bg);color:v
 @media (max-width:900px){.slot-wide{grid-column:auto}}
 .slot > .frag{flex:1 1 auto}
 .slot > p{margin-top:auto;padding-top:18px}
+/* 六块是奇数行：最后一块横跨两列并改横排，避免右边空半格 */
+.board > .slot:last-child{grid-column:1 / -1;flex-direction:row;
+  align-items:center;gap:clamp(20px,3vw,44px)}
+.board > .slot:last-child > .frag{flex:0 1 460px}
+.board > .slot:last-child > p{margin:0;padding:0;flex:1 1 auto;max-width:44ch}
+@media (max-width:900px){
+  .board > .slot:last-child{grid-column:auto;flex-direction:column;align-items:stretch}
+  .board > .slot:last-child > p{margin-top:auto;padding-top:18px;max-width:none}
+}
 .slot p{margin-top:18px;font-size:var(--step-body);color:var(--ink);max-width:44ch}
 .slot p b{font-weight:500;color:var(--ink)}
 
@@ -330,7 +334,6 @@ html.no-js .reveal{opacity:1;transform:none}
   .topbar .btn-sm{margin-left:auto}
   .row{grid-template-columns:1fr;gap:30px}
   .col-frag{order:-1}
-  .tiles{grid-template-columns:1fr 1fr}
   .board{grid-template-columns:1fr}
   .foot-grid{grid-template-columns:1fr 1fr}
   .hero .lede{max-width:30ch}
@@ -339,7 +342,6 @@ html.no-js .reveal{opacity:1;transform:none}
   .band.dark{padding-left:var(--pad);padding-right:var(--pad)}
 }
 @media (max-width:560px){
-  .tiles{grid-template-columns:1fr}
   .foot-grid{grid-template-columns:1fr}
   .cta-actions{gap:26px}
   .btn-lg{padding:17px 24px;font-size:var(--step-body);flex-direction:column;align-items:flex-start;gap:.35em}
