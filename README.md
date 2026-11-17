@@ -7,14 +7,25 @@
 > 播放规则对齐 [KazumiRules](https://github.com/Predidit/KazumiRules)，
 > **所有记录只保存在本机**。
 
-**当前版本：v1.9.9** ｜ Windows + Android ｜ Flutter
+**当前版本：Android v2.3.1 ｜ Windows v2.3.0** ｜ Flutter
+
+---
+
+## 下载
+
+| 平台 | 安装包 | 说明 |
+| --- | --- | --- |
+| Android | [Kchan-Android-v2.3.1.apk](https://dl.kchan.top/Kchan-Android-v2.3.1.apk) | 直接安装；应用内也会自动检查更新 |
+| Windows | [Kchan-Windows-v2.3.0-layout-preview-x64.zip](https://dl.kchan.top/Kchan-Windows-v2.3.0-layout-preview-x64.zip) | 解压后运行 `kchan.exe`，免安装 |
+
+官网：[kchan.top](https://kchan.top/)　｜　历史版本：[Releases](https://github.com/Koyome/kchan/releases)
 
 ---
 
 ## 功能
 
 - **番剧浏览** — 每日放送（按星期）、热门榜、搜索、追番、历史
-- **多线路聚合** — 86 条规则；按真实网络体检选出可用线路，
+- **多线路聚合** — 84 条规则；按真实网络体检选出可用线路，
   「快车道」先跑最快的 3 条并立即上屏，其余后台补充
 - **跨源自动切换** — 当前源解析失败/播放出错时自动换下一条，全部试完才报错
 - **本地播放** — media_kit(libmpv) 为主，fvp(libmdk) 运行期兜底；
@@ -23,6 +34,23 @@
 - **弹幕** — 弹弹play 弹幕接入（SHA-256 签名）
 - **图片反代** — 支持填多个代理地址，按顺序自动降级 + 独立熔断
 - **看门狗** — 检测视频输出掉帧（有声音没画面）并自动恢复
+
+---
+
+## 更新日志
+
+### v2.3.1（Android）
+
+- **新增稀饭动漫线路**（`next.xifanacg.com`），走官方 API：搜索 60–400ms，分集 2 线路 × 28 集
+- **修复：API 模式线路永远搜不到** —— 结构化 JSON 请求体里的 `@keyword` / `@source`
+  此前从未被替换，发出去的是字面量，接口 200 但结果为空
+- 详情页标签去掉「人」字后缀、字号加大
+- 评分优先取 Kazumi 镜像（与官网一致），移除刷新按钮与后台自动刷新
+- 构建改为离线打包，出包时间从约 10 分钟降到 2 分钟
+
+### v2.3.0（Windows 布局预览）
+
+- 新布局预览版，用于验证桌面端排版与交互
 
 ---
 
@@ -67,7 +95,7 @@ lib/
 ├── models.dart                  数据模型
 ├── api/
 │   ├── bangumi_api.dart         Bangumi 元数据 + 图片反代候选链
-│   ├── kazumi_rules.dart        规则引擎（解析 86 条线路规则）
+│   ├── kazumi_rules.dart        规则引擎（解析 84 条线路规则）
 │   ├── xpath_lite.dart          自研轻量 XPath（替代 DOM→XML 往返）
 │   ├── jsonpath_lite.dart       受限 JSONPath
 │   ├── play_resolver.dart       地址解析 + 注入广告扫描
@@ -93,7 +121,7 @@ lib/
 关键顺序是「**先改尺寸 → 再清样式位 → 最后 `SWP_FRAMECHANGED`**」；
 把三者塞进同一个 `SetWindowPos` 会导致视频 surface 失配（画面区透明）。
 
-**启动流程** — 规则库加载（86 条，约 2–12ms）放在首帧回调里而不是 `main()` 里，
+**启动流程** — 规则库加载（84 条，约 2–12ms）放在首帧回调里而不是 `main()` 里，
 保证窗口第一时间出现，且设置页/详情页读线路列表时规则已就绪。
 
 **看门狗** — 每 3 秒读 mpv 的 `estimated-vf-fps`：输出健康时是实际帧率，
@@ -140,7 +168,7 @@ dart run tool/verify_playback.dart
 
 | 日志行 | 含义 |
 | --- | --- |
-| `[启动] 规则库就绪：86 条（Nms）` | 规则加载完成，正常应在 50ms 内 |
+| `[启动] 规则库就绪：84 条（Nms）` | 规则加载完成，正常应在 50ms 内 |
 | `[聚合] 共 6 条线路：快车道 3 条 …` | 本次聚合的线路分组 |
 | `[源搜索] <源> kw="…" 命中 N 条 Nms` | 某线路的搜索耗时与命中数 |
 | `[规则更新] 目录 N 条 / 本地 M 条 / 可更新 K 条` | 启动时比对远程规则目录的结果 |
