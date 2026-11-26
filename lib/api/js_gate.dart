@@ -195,10 +195,10 @@ JsGateFetcher createGateFetcher() {
   return AndroidGateWebView.instance;
 }
 
-// ───────────────────── 给 HTTP 抓取层的一站式帮手 ─────────────────────
+// HTTP 客户端使用的 JS 挑战入口。
 
-/// 用平台 JS 引擎解锁 [url] 的反爬闸门：
-/// 成功返回渲染后的 HTML，并顺手收割 cookie 进 [GateCookies]。
+/// 用平台 JS 引擎执行 [url] 的页面验证。
+/// 返回渲染后的 HTML，并将 Cookie 存入 [GateCookies]。
 Future<String?> bypassJsGate(String url, {String referer = ''}) async {
   final fetcher = createGateFetcher();
   if (!fetcher.available) return null;

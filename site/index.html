@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>K酱 — Windows 上的追番播放器</title>
-<meta name="description" content="K酱是 Windows 上的追番播放器。本季放送表就在首页，86 条线路自动体检，断了自动换下一条。免安装。">
+<meta name="description" content="K酱 Windows 版。查看本季放送表，使用多条线路播放番剧。">
 <link rel="icon" href="app_icon.ico">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -27,9 +27,9 @@
   <!-- ══════════════ 首屏 ══════════════ -->
   <section class="hero">
     <div class="hero-copy">
-      <h1 class="reveal">打开就知道<br>今天看什么</h1>
+      <h1 class="reveal">K酱 Windows 版</h1>
 
-      <p class="lede reveal">Windows 上的追番播放器。本季放送表就在首页。</p>
+      <p class="lede reveal">查看本季放送表和播放线路。</p>
 
       <div class="hero-stats reveal">
         <div><b>0.7s</b><span>首页数据</span></div>
@@ -73,8 +73,8 @@
   <section class="band" id="lines">
     <div class="row">
       <div class="col-text reveal">
-        <h2>线路自己体检，坏的不等你</h2>
-        <p>每次解析前先测一遍，连不上的直接跳过。</p>
+        <h2>线路检测</h2>
+        <p>解析前检测线路是否可用。</p>
       </div>
 
       <div class="col-frag reveal">
@@ -113,8 +113,8 @@
       </div>
 
       <div class="col-text reveal">
-        <h2>断了就换下一条</h2>
-        <p>换成功才上屏，不用你手动切。</p>
+        <h2>自动切换线路</h2>
+        <p>当前线路解析失败时，尝试下一条。</p>
       </div>
     </div>
   </section>
@@ -135,7 +135,7 @@
 
   <!-- ══════════════ 段 3 · 其余功能 ══════════════ -->
   <section class="band" id="rest">
-    <h2 class="wide reveal">播放器该有的都有</h2>
+    <h2 class="wide reveal">播放功能</h2>
 
     <div class="board">
       <div class="slot slot-wide reveal">
@@ -153,7 +153,7 @@
             <li><span>字号</span><b>中</b></li>
           </ul>
         </div>
-        <p><b>弹幕</b> 接弹弹play，签名校验，样式可调。</p>
+        <p><b>弹幕</b> 弹幕来自弹弹play，可调透明度和字号。</p>
       </div>
 
       <div class="slot reveal">
@@ -179,7 +179,7 @@
           </div>
           <p class="frag-note">铺满屏幕并盖住任务栏，退出后还原。</p>
         </div>
-        <p><b>真·无边框全屏</b> 不是最大化，是铺满。</p>
+        <p><b>无边框全屏</b> 退出后恢复原窗口大小。</p>
       </div>
 
       <div class="slot reveal">
@@ -218,7 +218,7 @@
             <li><span>账号系统</span><b>没有</b></li>
           </ul>
         </div>
-        <p><b>记录只在本机</b> 没有账号，不上传。</p>
+        <p><b>本地记录</b> Windows 版在本机保存追番和观看历史。</p>
       </div>
     </div>
   </section>
@@ -227,10 +227,10 @@
   <section class="band faq" id="faq">
     <h2 class="wide reveal">常见问题</h2>
     <div class="faq-list reveal">
-      <details><summary>需要安装吗？</summary><p>不用，解压双击就能跑。</p></details>
+      <details><summary>需要安装吗？</summary><p>解压后运行 kchan.exe。</p></details>
       <details><summary>番剧数据是哪来的？</summary><p>元数据来自 Bangumi，播放地址由 86 条规则解析。</p></details>
-      <details><summary>为什么有的番搜不到？</summary><p>K酱 不存资源，所有线路都没有就播不了。</p></details>
-      <details><summary>安卓版呢？</summary><p>在做，敬请期待。</p></details>
+      <details><summary>为什么有的番搜不到？</summary><p>播放取决于第三方线路是否提供该番剧。</p></details>
+      <details><summary>在哪下载 Android 或 iOS 版？</summary><p>请到 <a href="https://kchan.top/#download">K酱官网</a> 下载。</p></details>
     </div>
   </section>
 
@@ -243,8 +243,7 @@
         下载 K酱
       </a>
       <div class="alt">
-        <b>安卓版</b>
-        <span>敬请期待</span>
+        <a href="https://kchan.top/#download">Android 和 iOS 下载</a>
       </div>
     </div>
     <p class="note reveal">也可以到 <a href="https://github.com/Koyome/kchan/releases">GitHub 全部版本</a>。</p>
@@ -265,7 +264,7 @@
 <footer>
   <p class="foot-mark">K酱</p>
   <div class="foot-grid">
-    <div><b>下载</b><a href="#download">Windows v2.1.10</a><span>Android 敬请期待</span></div>
+    <div><b>下载</b><a href="#download">Windows v2.1.10</a><a href="https://kchan.top/#download">Android 和 iOS</a></div>
     <div><b>源码</b><a href="https://github.com/Koyome/kchan">github.com/Koyome/kchan</a></div>
     <div><b>致谢</b><span>Bangumi 番组计划</span><span>弹弹play</span><span>KazumiRules</span><span>media_kit / libmpv</span></div>
     <div><b>说明</b><a href="#disclaimer">免责声明</a><span>本站不含影视资源，只做聚合。</span></div>
