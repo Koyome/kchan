@@ -6,7 +6,7 @@ K酱是用 Flutter 开发的追番播放器。番剧资料来自 [Bangumi 番组
 
 | 平台 | 当前版本 | 安装方式 |
 | --- | --- | --- |
-| Android | v2.3.2 b47 | [ARM64 精简包](https://dl.kchan.top/Kchan-Android-v2.3.2-b47-arm64-v8a.apk) · [通用 APK](https://dl.kchan.top/Kchan-Android-v2.3.2-b47-mobile-parity.apk) |
+| Android | v2.3.2 b50 | [ARM64 精简包](https://dl.kchan.top/Kchan-Android-v2.3.2-b50-arm64-v8a.apk) · [通用 APK](https://dl.kchan.top/Kchan-Android-v2.3.2-b50-universal.apk) |
 | iOS / iPadOS | v2.3.2 b59 | 下载 [IPA](https://dl.kchan.top/Kchan-iOS-v2.3.2-b59_no_sign.ipa) 后，按 [官网教程](https://kchan.top/ios-guide/) 自签安装 |
 | Windows | v2.3.2 | 下载 [ZIP](https://dl.kchan.top/Kchan-Windows-v2.3.2.zip)，解压后运行 `kchan.exe` |
 
